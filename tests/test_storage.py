@@ -1,3 +1,7 @@
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+from pager_mcp import __build__, __version__
+from pager_mcp.server import build_app
 from pager_mcp.storage import MailboxStore
 
 
@@ -15,3 +19,18 @@ def test_pop_removes_oldest():
     store.enqueue(token, {"message": "one"})
     assert store.pop(token).payload["message"] == "one"
     assert store.pop(token) is None
+
+
+@pytest.mark.asyncio
+async def test_version_endpoint():
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/version")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["version"] == __version__
+        assert data["build"] == __build__
+    finally:
+        await client.close()

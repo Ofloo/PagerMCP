@@ -9,6 +9,7 @@ from typing import Any
 
 from aiohttp import web
 
+from . import __build__, __version__
 from .storage import MailboxStore
 
 
@@ -24,6 +25,9 @@ def build_app() -> web.Application:
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
+
+    async def version(_: web.Request) -> web.Response:
+        return web.json_response({"version": __version__, "build": __build__})
 
     async def new_mailbox(_: web.Request) -> web.Response:
         token = str(uuid.uuid4())
@@ -81,7 +85,7 @@ def build_app() -> web.Application:
             raise web.HTTPRequestTimeout(text="wait timed out")
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
     return app
 
 
