@@ -17,7 +17,7 @@ The server does not interpret messages. Payloads may contain `PROJECT`, `JOB_ID`
 
 `POST /notify` accepts JSON and requires `Authorization: Bearer <UUID>`. Accepted messages return `202`; malformed or oversized messages return `400` or `413`; a full mailbox returns `429`.
 
-`GET /mailboxes/{uuid}/messages` lists queued messages. `POST /mailboxes/{uuid}/consume` consumes the oldest message. `GET /mailboxes/{uuid}/wait` blocks until a message is available.
+`GET /mailboxes/{uuid}/messages` lists queued messages. `POST /mailboxes/{uuid}/consume` consumes the oldest message. `GET /mailboxes/{uuid}/wait` blocks until a message is available. Every message response includes `id` and `created_at` as a Unix timestamp, in addition to the submitted payload.
 
 ## Limits and retention
 

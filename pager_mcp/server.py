@@ -52,24 +52,27 @@ def build_app() -> web.Application:
             raise web.HTTPTooManyRequests(text="mailbox is full")
         for waiter in waiters.pop(token, []):
             if not waiter.done():
-                waiter.set_result({"id": page.id, **page.payload})
+                waiter.set_result(page_data(page))
         return web.json_response({"accepted": True, "id": page.id}, status=202)
+
+    def page_data(page: Any) -> dict[str, Any]:
+        return {"id": page.id, "created_at": page.created_at, **page.payload}
 
     async def pending(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
-        return web.json_response({"messages": [{"id": page.id, **page.payload} for page in store.pending(token)]})
+        return web.json_response({"messages": [page_data(page) for page in store.pending(token)]})
 
     async def consume(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         page = store.pop(token)
-        return web.json_response({"message": ({"id": page.id, **page.payload} if page else None)})
+        return web.json_response({"message": (page_data(page) if page else None)})
 
     async def wait(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         page = store.pop(token)
         if page:
-            return web.json_response({"id": page.id, **page.payload})
+            return web.json_response(page_data(page))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         waiters.setdefault(token, []).append(future)
         try:
