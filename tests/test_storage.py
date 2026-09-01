@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from pager_mcp import __build__, __version__
@@ -34,3 +36,15 @@ async def test_version_endpoint():
         assert data["build"] == __build__
     finally:
         await client.close()
+
+
+def test_pager_plugin_syntax():
+    plugin_path = Path("plugins/pager.js")
+    assert plugin_path.exists()
+    content = plugin_path.read_text(encoding="utf-8")
+    assert "export const PagerPlugin" in content
+    assert 'const DEFAULT_PAGER_URL = "http://10.13.17.60:6721"' in content
+    assert "PAGER_URL" in content
+    assert "Pager Plugin loaded for" in content
+    assert "/mailboxes/" in content
+    assert "/wait" in content
