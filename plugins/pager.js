@@ -15,6 +15,11 @@ const messageText = (page) => {
   return lines.join("\n")
 }
 
+const PAGER_SYSTEM_INSTRUCTION = `PagerMCP background delivery is active.
+When you receive a prompt starting with "Pagerbericht ontvangen:", treat it as an asynchronous external job notification with fields such as PROJECT, JOB_ID, status, message, and logs.
+Acknowledge the event concisely, interpret status/logs, continue the related workflow, and report any failure.
+Do not manually call wait_for_event or poll the pager; the Pager Plugin listens in the background and delivers notifications automatically.`
+
 export const PagerPlugin = async ({ client, directory }) => {
   const pagerUrl = (process.env.PAGER_URL || DEFAULT_PAGER_URL).replace(/\/$/, "")
   const sessionPath = process.env.PAGER_SESSION_FILE || `${directory}/.pager_session`
@@ -87,6 +92,9 @@ export const PagerPlugin = async ({ client, directory }) => {
   waitForPager()
 
   return {
+    "experimental.chat.system.transform": async (_input, output) => {
+      output.system.push(PAGER_SYSTEM_INSTRUCTION)
+    },
     event: async ({ event }) => {
       const eventSession = sessionIdFromEvent(event)
       if (eventSession) activeSession = eventSession
