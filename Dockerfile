@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+ARG BUILD_NUMBER=0
+ENV PAGERMCP_BUILD=$BUILD_NUMBER
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

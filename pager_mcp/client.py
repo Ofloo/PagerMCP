@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
+
+from . import __build__, __version__
 
 
 def server_url() -> str:
@@ -43,7 +46,17 @@ def request(path: str, method: str = "GET", body: dict | None = None) -> dict:
         return json.load(response)
 
 
+def check_version() -> None:
+    try:
+        remote = request("/version")
+    except (OSError, urllib.error.URLError):
+        return
+    if str(remote.get("version")) != __version__ or str(remote.get("build")) != __build__:
+        print(f"PagerMCP version mismatch: client {__version__} build {__build__}, server {remote.get('version')} build {remote.get('build')}", file=sys.stderr)
+
+
 def main() -> None:
+    check_version()
     token = get_token()
     for line in sys.stdin:
         message = json.loads(line)
@@ -51,7 +64,7 @@ def main() -> None:
             continue
         method = message.get("method")
         if method == "initialize":
-            result = {"protocolVersion": message.get("params", {}).get("protocolVersion", "2025-03-26"), "capabilities": {"tools": {}}, "serverInfo": {"name": "pagermcp", "version": "0.1.0"}}
+            result = {"protocolVersion": message.get("params", {}).get("protocolVersion", "2025-03-26"), "capabilities": {"tools": {}}, "serverInfo": {"name": "pagermcp", "version": f"{__version__}+{__build__}"}}
         elif method == "tools/list":
             result = {"tools": [{"name": "wait_for_event", "description": "Wait for the next page in the session mailbox without polling.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}]}
         elif method == "tools/call" and message.get("params", {}).get("name") == "wait_for_event":

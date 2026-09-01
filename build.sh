@@ -12,12 +12,20 @@ BUILDER_NAME="multiarch-builder"
 # Parse command line arguments
 TAG="${1:-$DEFAULT_TAG}"
 BUILD_ARGS=""
+BUILD_NUMBER_FILE=".build_number"
+BUILD_NUMBER=0
+if [[ -f "$BUILD_NUMBER_FILE" ]]; then
+    BUILD_NUMBER=$(<"$BUILD_NUMBER_FILE")
+fi
+BUILD_NUMBER=$((BUILD_NUMBER + 1))
+printf '%s\n' "$BUILD_NUMBER" > "$BUILD_NUMBER_FILE"
+BUILD_ARGS="--build-arg BUILD_NUMBER=$BUILD_NUMBER"
 
 # Check if we should build for Hailo (ARM64 only)
 if [[ "$TAG" == *"-hailo"* ]]; then
     echo "🔧 Hailo build detected - limiting to ARM64"
     PLATFORMS="linux/arm64"
-    BUILD_ARGS="--build-arg HAILO_BUILD=true"
+    BUILD_ARGS+=" --build-arg HAILO_BUILD=true"
 fi
 
 # Log configuration
