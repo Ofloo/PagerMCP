@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from pager_mcp import __build__, __version__
+from pager_mcp.client import fix_session_file_ownership, get_current_session_key
 from pager_mcp.server import build_app
 from pager_mcp.storage import MailboxStore
 
@@ -33,10 +35,22 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.2.0"
+        assert data["version"] == "0.2.1"
         assert data["build"] == __build__
     finally:
         await client.close()
+
+
+def test_session_key_and_ownership(tmp_path, monkeypatch):
+    path = tmp_path / ".pager_session"
+    token = "00000000-0000-0000-0000-000000000002"
+    path.write_text(token + "\n", encoding="utf-8")
+    monkeypatch.setenv("PROJECT_DIR", str(tmp_path))
+    monkeypatch.setenv("PAGER_UID", str(os.getuid()))
+    monkeypatch.setenv("PAGER_GID", str(os.getgid()))
+    assert get_current_session_key() == token
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert (path.stat().st_uid, path.stat().st_gid) == (os.getuid(), os.getgid())
 
 
 def test_pager_plugin_syntax():

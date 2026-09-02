@@ -22,12 +22,29 @@ def session_file() -> Path:
     return Path(os.getenv("PROJECT_DIR", os.getcwd())) / ".pager_session"
 
 
+def session_owner() -> tuple[int, int]:
+    uid = int(os.getenv("PAGER_UID", os.getuid()))
+    gid = int(os.getenv("PAGER_GID", os.getgid()))
+    return uid, gid
+
+
+def fix_session_file_ownership(path: Path) -> None:
+    uid, gid = session_owner()
+    try:
+        os.chown(path, uid, gid)
+    except PermissionError:
+        if (path.stat().st_uid, path.stat().st_gid) != (uid, gid):
+            raise
+
+
 def get_token() -> str:
     path = session_file()
     if path.exists():
         token = path.read_text(encoding="utf-8").strip()
         try:
             uuid.UUID(token)
+            path.chmod(0o600)
+            fix_session_file_ownership(path)
             return token
         except ValueError:
             pass
@@ -36,7 +53,12 @@ def get_token() -> str:
         token = json.load(response)["uuid"]
     path.write_text(token + "\n", encoding="utf-8")
     path.chmod(0o600)
+    fix_session_file_ownership(path)
     return token
+
+
+def get_current_session_key() -> str:
+    return get_token()
 
 
 def request(path: str, method: str = "GET", body: dict | None = None) -> dict:
