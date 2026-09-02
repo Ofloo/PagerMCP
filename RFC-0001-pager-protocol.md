@@ -31,7 +31,7 @@ Without `DATA_DIR`, storage is in memory. With `DATA_DIR`, SQLite persists mailb
 
 ## Client lifecycle
 
-At startup, the client reads `.pager_session`; if absent or invalid, it requests a mailbox and creates the file with mode `0600`. The file must be excluded by `.gitignore`. Queued messages are available immediately after reconnecting.
+At startup, the client reads the current session key from `.pager_session`; if absent or invalid, it requests a mailbox and creates the file with mode `0600`. The client repairs file ownership using `PAGER_UID` and `PAGER_GID`, defaulting to its current UID and GID. For Docker clients, run with `--user "$(id -u):$(id -g)"` so the mounted project file is readable by the host AI client. The file must be excluded by `.gitignore`. Queued messages are available immediately after reconnecting.
 
 ## Configuration
 
