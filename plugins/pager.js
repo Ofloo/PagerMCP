@@ -1,4 +1,4 @@
-const DEFAULT_PAGER_URL = "http://10.13.17.60:6721"
+const DEFAULT_PAGER_URL = "https://pager.ofloo.io"
 
 const unwrap = (value) => value?.data ?? value
 
