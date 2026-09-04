@@ -58,7 +58,7 @@ def test_pager_plugin_syntax():
     assert plugin_path.exists()
     content = plugin_path.read_text(encoding="utf-8")
     assert "export const PagerPlugin" in content
-    assert 'const DEFAULT_PAGER_URL = "http://10.13.17.60:6721"' in content
+    assert 'const DEFAULT_PAGER_URL = "https://pager.ofloo.io"' in content
     assert "PAGER_URL" in content
     assert "Pager Plugin loaded for" in content
     assert '"experimental.chat.system.transform"' in content
