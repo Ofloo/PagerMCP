@@ -22,12 +22,28 @@ def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
     store = MailboxStore(os.getenv("DATA_DIR") or None, env_float("MAILBOX_TTL_DAYS", 30), env_float("MESSAGE_TTL_DAYS", 7), int(os.getenv("MAX_MESSAGES_PER_MAILBOX", "128")))
     waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
+    static_cache = {"Cache-Control": "max-age=3600"}
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
     async def version(_: web.Request) -> web.Response:
         return web.json_response({"version": __version__, "build": __build__})
+
+    async def root(_: web.Request) -> web.Response:
+        rfc_path = os.path.join(base_dir, "RFC-0001-pager-protocol.md")
+        if not os.path.isfile(rfc_path):
+            raise web.HTTPNotFound()
+        return web.FileResponse(rfc_path, headers={**static_cache, "Content-Type": "text/plain"})
+
+    async def sample(request: web.Request) -> web.Response:
+        name = request.match_info.get("name", "")
+        sample_dir = os.path.join(base_dir, "sample")
+        filepath = os.path.abspath(os.path.join(sample_dir, name))
+        if not name or not filepath.startswith(os.path.abspath(sample_dir) + os.sep) or not os.path.isfile(filepath):
+            raise web.HTTPNotFound()
+        return web.FileResponse(filepath, headers={**static_cache, "Content-Type": "application/x-sh"})
 
     async def new_mailbox(_: web.Request) -> web.Response:
         token = str(uuid.uuid4())
@@ -85,7 +101,7 @@ def build_app() -> web.Application:
             raise web.HTTPRequestTimeout(text="wait timed out")
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
     return app
 
 

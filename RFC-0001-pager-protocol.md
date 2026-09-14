@@ -21,6 +21,8 @@ The server does not interpret messages. Payloads may contain `PROJECT`, `JOB_ID`
 
 `GET /version` returns the running semantic version and sequential build number, for example `{ "version": "0.1.0", "build": "42" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection.
 
+`GET /` serves the protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. Both are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
+
 ## Limits and retention
 
 Implementations must bound request size, mailbox depth, message retention, and mailbox retention. Defaults are 64 KiB, 128 messages, 7 days, and 30 days. All are configurable through environment variables. A full mailbox rejects new messages; it does not discard existing messages.

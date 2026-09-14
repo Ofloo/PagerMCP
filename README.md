@@ -19,8 +19,20 @@ curl -X POST http://localhost:8080/notify \
 
 Run client:
 ```bash
-docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD":/workspace -e MODE=client -e PROJECT_DIR=/workspace -e SERVER_URL=http://localhost:8080 ofloo/pagermcp
+docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD":/workspace -e MODE=client -e PROJECT_DIR=/workspace -e SERVER_URL=https://pager.ofloo.io ofloo/pagermcp
 ```
+
+## Sample script
+
+A generic notification wrapper is published by the server. Download it on any machine, no repository needed:
+
+```bash
+curl -fsS -O https://pager.ofloo.io/sample/pager.sh
+chmod +x pager.sh
+./pager.sh --run "make" --message "Build finished" --tail 5
+```
+
+The script runs a command in the foreground, sends one notification with the status, message, exit code, and the last `--tail` lines of output, then exits with the command's exit code. Use `--dry-run` (or `--dry-run=5`) to simulate without sending, `--session <uuid|file>` to pass the mailbox address (defaults to `./.pager_session`), and `--notify` for an immediate page. `--project`, `--job-id`, and all other fields are free-form and passed through as-is.
 
 ## Pager Plugin
 
