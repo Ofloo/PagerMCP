@@ -21,7 +21,19 @@ The server does not interpret messages. Payloads may contain `PROJECT`, `JOB_ID`
 
 `GET /version` returns the running semantic version and sequential build number, for example `{ "version": "0.1.0", "build": "42" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection.
 
-`GET /` serves the protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. Both are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
+`GET /` serves this protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. Both are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
+
+## Sample wrapper
+
+`sample/pager.sh` is a generic, self-contained notification wrapper published by the server at `/sample/pager.sh`. It requires only `curl` and a POSIX shell.
+
+- Modes: run a command in the foreground (`--run`), watch an existing PID (`--pid`), or send an immediate page (`--notify`).
+- The mailbox address comes from `--session <uuid|file>`, defaulting to `./.pager_session`.
+- The server URL defaults to `https://pager.ofloo.io` and can be overridden with `PAGER_URL` or `--session`-adjacent environment configuration.
+- Every notification includes `status`, `message`, and `exit_code`; the last `N` lines of output are attached as `logs` when `--log` and `--tail` are used (default tail: 10).
+- `PROJECT` and `JOB_ID` are free-form fields; `PROJECT` is omitted from the payload unless `--project` is given.
+- The wrapper exits with the exit code of the command it ran and never keeps running after the command finishes.
+- `--dry-run` (or `--dry-run=<code>`) prints the notification instead of sending it and exits with the configured code (default `0`).
 
 ## Limits and retention
 
