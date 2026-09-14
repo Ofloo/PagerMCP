@@ -5,6 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY pager_mcp pager_mcp
+RUN chmod -R a+r /app/pager_mcp
 COPY README.md RFC-0001-pager-protocol.md /app/
 COPY sample /app/sample
 RUN chmod -R a+r /app/sample

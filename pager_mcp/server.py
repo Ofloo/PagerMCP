@@ -43,8 +43,16 @@ def build_app() -> web.Application:
             raise web.HTTPNotFound()
         if markdown is None:
             raise web.HTTPInternalServerError(text="markdown package is required to serve the README")
-        html = markdown.markdown(readme_path.read_text(encoding="utf-8"), output_format="html5")
-        return web.Response(text=html, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
+        body = markdown.markdown(readme_path.read_text(encoding="utf-8"), output_format="html5", extensions=["tables", "fenced_code"])
+        css = (Path(__file__).parent / "readme.css").read_text(encoding="utf-8")
+        page = (
+            "<!DOCTYPE html>"
+            '<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f"<title>PagerMCP</title><style>{css}</style></head>"
+            f"<main>{body}</main></html>"
+        )
+        return web.Response(text=page, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
 
     async def rfc(_: web.Request) -> web.Response:
         rfc_path = Path(base_dir) / "RFC-0001-pager-protocol.md"

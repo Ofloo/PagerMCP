@@ -50,8 +50,11 @@ async def test_root_serves_readme_as_html():
         resp = await client.get("/")
         assert resp.status == 200
         assert "text/html" in resp.headers["Content-Type"]
-        assert "<h1>PagerMCP</h1>" in await resp.text()
-        assert "When to use PagerMCP" in await resp.text()
+        body = await resp.text()
+        assert "<h1>PagerMCP</h1>" in body
+        assert "When to use PagerMCP" in body
+        assert "<style>" in body
+        assert "<table>" in body
         assert "max-age=3600" in resp.headers["Cache-Control"]
     finally:
         await client.close()
