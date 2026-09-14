@@ -35,7 +35,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.2.1"
+        assert data["version"] == "0.3.0"
         assert data["build"] == __build__
     finally:
         await client.close()
