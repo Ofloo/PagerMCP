@@ -1,1 +1,2 @@
 aiohttp==3.12.15
+markdown==3.8

@@ -35,19 +35,35 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.0"
+        assert data["version"] == "0.3.1"
         assert data["build"] == __build__
     finally:
         await client.close()
 
 
 @pytest.mark.asyncio
-async def test_root_serves_rfc_as_plain_text():
+async def test_root_serves_readme_as_html():
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
         resp = await client.get("/")
+        assert resp.status == 200
+        assert "text/html" in resp.headers["Content-Type"]
+        assert "<h1>PagerMCP</h1>" in await resp.text()
+        assert "When to use PagerMCP" in await resp.text()
+        assert "max-age=3600" in resp.headers["Cache-Control"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_rfc_endpoint_serves_rfc_as_plain_text():
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/rfc")
         assert resp.status == 200
         assert "text/plain" in resp.headers["Content-Type"]
         assert "RFC-0001: Pager Protocol" in await resp.text()

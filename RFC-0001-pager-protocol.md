@@ -21,7 +21,7 @@ The server does not interpret messages. Payloads may contain `PROJECT`, `JOB_ID`
 
 `GET /version` returns the running semantic version and sequential build number, for example `{ "version": "0.1.0", "build": "42" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection.
 
-`GET /` serves this protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. Both are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
+`GET /` serves the README rendered as HTML. `GET /rfc` serves this protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. All are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
 
 ## Sample wrapper
 

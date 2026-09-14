@@ -5,9 +5,15 @@ import json
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from aiohttp import web
+
+try:
+    import markdown
+except ImportError:
+    markdown = None
 
 from . import __build__, __version__
 from .storage import MailboxStore
@@ -32,8 +38,17 @@ def build_app() -> web.Application:
         return web.json_response({"version": __version__, "build": __build__})
 
     async def root(_: web.Request) -> web.Response:
-        rfc_path = os.path.join(base_dir, "RFC-0001-pager-protocol.md")
-        if not os.path.isfile(rfc_path):
+        readme_path = Path(base_dir) / "README.md"
+        if not readme_path.is_file():
+            raise web.HTTPNotFound()
+        if markdown is None:
+            raise web.HTTPInternalServerError(text="markdown package is required to serve the README")
+        html = markdown.markdown(readme_path.read_text(encoding="utf-8"), output_format="html5")
+        return web.Response(text=html, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
+
+    async def rfc(_: web.Request) -> web.Response:
+        rfc_path = Path(base_dir) / "RFC-0001-pager-protocol.md"
+        if not rfc_path.is_file():
             raise web.HTTPNotFound()
         return web.FileResponse(rfc_path, headers={**static_cache, "Content-Type": "text/plain"})
 
@@ -101,7 +116,7 @@ def build_app() -> web.Application:
             raise web.HTTPRequestTimeout(text="wait timed out")
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
     return app
 
 
