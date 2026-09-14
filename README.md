@@ -22,9 +22,32 @@ Run client:
 docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD":/workspace -e MODE=client -e PROJECT_DIR=/workspace -e SERVER_URL=https://pager.ofloo.io ofloo/pagermcp
 ```
 
+## When to use PagerMCP
+
+Use PagerMCP for any job that takes long enough that waiting for it wastes time or tokens. Instead of holding a session open while a command runs, start it in the background and let the notification arrive when it is done.
+
+| Task type | Examples | Why page it |
+|---|---|---|
+| Compilation | `make`, `cargo build`, `npm run build` | Easily takes minutes. |
+| Container builds | `docker build`, `docker buildx build` | Multi-arch builds are slow. |
+| Test suites | `pytest`, `go test`, `npm test` | Full runs take minutes. |
+| Deployments | `git push`, `rsync`, uploads | Network-bound and slow. |
+| Remote jobs | CI runs, remote builds, batch processing | Run outside the agent session. |
+
+AI agents should do this automatically: fire long jobs through the pager in the background, report the `JOB_ID`, and end the turn. Users should not have to remind an agent of this for every compile, build, or test. Skip the pager for short commands (`ls`, `git status`, quick greps); waiting for those costs less than paging.
+
 ## Sample script
 
-A generic notification wrapper is published by the server. Download it on any machine, no repository needed:
+`pager.sh` is only a sample. PagerMCP is a plain HTTP API: every notification can be sent directly with `curl` (or any HTTP client), no wrapper or special client required:
+
+```bash
+curl -X POST https://pager.ofloo.io/notify \
+  -H "Authorization: Bearer $(cat .pager_session)" \
+  -H "Content-Type: application/json" \
+  -d '{"JOB_ID": "build-latest", "status": "success", "message": "Build finished", "exit_code": 0}'
+```
+
+For convenience the server publishes a generic wrapper script. Download it on any machine, no repository needed:
 
 ```bash
 curl -fsS -O https://pager.ofloo.io/sample/pager.sh
@@ -32,7 +55,7 @@ chmod +x pager.sh
 ./pager.sh --run "make" --message "Build finished" --tail 5
 ```
 
-The script runs a command in the foreground, sends one notification with the status, message, exit code, and the last `--tail` lines of output, then exits with the command's exit code. Use `--dry-run` (or `--dry-run=5`) to simulate without sending, `--session <uuid|file>` to pass the mailbox address (defaults to `./.pager_session`), and `--notify` for an immediate page. `--project`, `--job-id`, and all other fields are free-form and passed through as-is.
+The script runs a command in the foreground, sends one notification with the status, message, exit code, and the last `--tail` lines of output, then exits with the command's exit code. Use `--dry-run` (or `--dry-run=5`) to simulate without sending, `--session <uuid|file>` to pass the mailbox address (defaults to `./.pager_session`), and `--notify` for an immediate page. `--project`, `--job-id`, and all other fields are free-form and passed through as-is. Run `./pager.sh --help` for the full list of modes, options, and examples.
 
 ## Pager Plugin
 
