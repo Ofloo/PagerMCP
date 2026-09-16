@@ -19,6 +19,10 @@ The server does not interpret messages. Payloads may contain `PROJECT`, `JOB_ID`
 
 `GET /mailboxes/{uuid}/messages` lists queued messages. `POST /mailboxes/{uuid}/consume` consumes the oldest message. `GET /mailboxes/{uuid}/wait` blocks until a message is available. Every message response includes `id` and `created_at` as a Unix timestamp, in addition to the submitted payload.
 
+Delivery is at-most-once per message `id`: a message handed to a blocked `wait` request is removed from the queue in the same operation, so a subsequent `wait` cannot return it again. When `POST /notify` finds one or more blocked `wait` requests on the mailbox, each waiter receives the message once and the message is removed; when no waiter is blocked, the message stays queued and is returned by the next `wait` or `consume`. Clients must treat a repeated `id` as a protocol violation, not as a new event.
+
+Messages left queued because no consumer was connected are delivered to the next `wait` regardless of age within the message retention window; deliver the queue oldest-first and use `created_at` to judge whether an old queued page is still relevant.
+
 `GET /version` returns the running semantic version and sequential build number, for example `{ "version": "0.1.0", "build": "42" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection.
 
 `GET /` serves the README rendered as HTML. `GET /rfc` serves this protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. All are cacheable for one hour. The sample directory is not listable; only exact file names resolve.

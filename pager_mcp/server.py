@@ -93,9 +93,13 @@ def build_app() -> web.Application:
         page = store.enqueue(token, payload)
         if page is None:
             raise web.HTTPTooManyRequests(text="mailbox is full")
+        delivered = False
         for waiter in waiters.pop(token, []):
             if not waiter.done():
                 waiter.set_result(page_data(page))
+                delivered = True
+        if delivered:
+            store.remove(page.id)
         return web.json_response({"accepted": True, "id": page.id}, status=202)
 
     def page_data(page: Any) -> dict[str, Any]:

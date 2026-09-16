@@ -95,3 +95,12 @@ class MailboxStore:
                 last_seen, stored = self.mailboxes[token]
                 self.mailboxes[token] = (last_seen, stored[1:])
         return page
+
+    def remove(self, page_id: str) -> None:
+        with self.lock:
+            if self.db:
+                self.db.execute("DELETE FROM pages WHERE id=?", (page_id,))
+                self.db.commit()
+            else:
+                for token, (last_seen, pages) in self.mailboxes.items():
+                    self.mailboxes[token] = (last_seen, [page for page in pages if page.id != page_id])

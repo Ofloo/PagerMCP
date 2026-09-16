@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 
@@ -25,6 +26,101 @@ def test_pop_removes_oldest():
     assert store.pop(token) is None
 
 
+def test_remove_by_id_keeps_others():
+    store = MailboxStore(None, 30 * 86400, 7 * 86400, 128)
+    token = "00000000-0000-0000-0000-000000000003"
+    first = store.enqueue(token, {"message": "one"})
+    second = store.enqueue(token, {"message": "two"})
+    store.remove(first.id)
+    remaining = store.pending(token)
+    assert [page.id for page in remaining] == [second.id]
+    assert store.pop(token).id == second.id
+    assert store.pop(token) is None
+
+
+def test_remove_by_id_sqlite(tmp_path):
+    store = MailboxStore(str(tmp_path), 30 * 86400, 7 * 86400, 128)
+    token = "00000000-0000-0000-0000-000000000004"
+    first = store.enqueue(token, {"message": "one"})
+    second = store.enqueue(token, {"message": "two"})
+    store.remove(first.id)
+    remaining = store.pending(token)
+    assert [page.id for page in remaining] == [second.id]
+
+
+async def _wait_payload(client, token):
+    resp = await client.get(f"/mailboxes/{token}/wait")
+    assert resp.status == 200
+    return await resp.json()
+
+
+@pytest.mark.asyncio
+async def test_wait_does_not_redeliver_consumed_page(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "10")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        waiter = asyncio.create_task(_wait_payload(client, token))
+        await asyncio.sleep(0.05)
+        accepted = await client.post("/notify", json={"uuid": token, "message": "hello"})
+        assert accepted.status == 202
+        page_id = (await accepted.json())["id"]
+        delivered = await waiter
+        assert delivered["id"] == page_id
+        assert delivered["message"] == "hello"
+        monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
+        second = await client.get(f"/mailboxes/{token}/wait")
+        assert second.status == 408
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert pending["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_delivers_backlog_when_no_waiter(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "5")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        accepted = await client.post("/notify", json={"uuid": token, "message": "queued"})
+        page_id = (await accepted.json())["id"]
+        delivered = await _wait_payload(client, token)
+        assert delivered["id"] == page_id
+        assert delivered["message"] == "queued"
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert pending["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_notify_with_multiple_waiters_delivers_once_per_waiter(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "10")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        waiters = [asyncio.create_task(_wait_payload(client, token)) for _ in range(2)]
+        await asyncio.sleep(0.05)
+        accepted = await client.post("/notify", json={"uuid": token, "message": "fanout"})
+        page_id = (await accepted.json())["id"]
+        delivered = await asyncio.gather(*waiters)
+        assert [page["id"] for page in delivered] == [page_id, page_id]
+        monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
+        extra = await client.get(f"/mailboxes/{token}/wait")
+        assert extra.status == 408
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert pending["messages"] == []
+    finally:
+        await client.close()
+
+
 @pytest.mark.asyncio
 async def test_version_endpoint():
     app = build_app()
@@ -35,7 +131,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.1"
+        assert data["version"] == "0.3.2"
         assert data["build"] == __build__
     finally:
         await client.close()
