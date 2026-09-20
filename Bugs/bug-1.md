@@ -1,10 +1,11 @@
 # bug-1.md — dubbele levering met hetzelfde `id`
 
-- **Pager-versie** (`https://pager.ofloo.io/version`): `{"version": "0.3.1", "build": "18"}`
+- **Pager-versie bij melden** (`https://pager.ofloo.io/version`): `{"version": "0.3.1", "build": "18"}`
   (lokaal `http://10.13.17.60:6721/version`: idem)
+- **Pager-versie bij afronden** (`https://pager.ofloo.io/version`): `{"version": "0.3.4", "build": "24"}`
 - **Component**: `pager_mcp/server.py` `notify()`/`wait()` + `pager_mcp/storage.py`
 - **Ernst**: hoog / reproduceerbaar
-- **Status**: **OPEN** — oorzaak bewezen, fix voorgesteld
+- **Status**: **RESOLVED in `v0.3.2`** (commit `a707177`) — fix uitgerold, productie geverifieerd op `0.3.4` build 24
 
 ## Symptoom
 Dezelfde melding wordt **twee keer met een identiek `id`** bezorgd bij de client
@@ -71,3 +72,24 @@ if delivered:
 3. Tweede `GET /wait` met korte `WAIT_TIMEOUT_SECONDS` → mag **niet** hetzelfde `id`
    teruggeven (verwacht HTTP 408/leeg).
 4. `GET /mailboxes/{token}/messages` → de geleverde page is weg.
+
+## Afronding (uitgerold)
+
+Geïmplementeerd zoals voorgesteld: `MailboxStore.remove(page_id)` in `storage.py` en
+`notify()` zet `delivered = True` bij elke live waiter en roept daarna `store.remove(page.id)`
+aan (zonder waiter blijft de page in de queue — backlog ongewijzigd).
+
+Verificatie:
+
+- **Python-tests** (v0.3.2): `test_wait_does_not_redeliver_consumed_page`,
+  `test_notify_with_multiple_waiters_delivers_once_per_waiter`,
+  `test_wait_delivers_backlog_when_no_waiter`, `test_remove_by_id_keeps_others`,
+  `test_remove_by_id_sqlite`.
+- **Docker E2E**: `v0.3.1` gaf bij de tweede `wait` HTTP 200 met hetzelfde `id`; `v0.3.2` gaf
+  HTTP 408 — zowel in-memory als met `DATA_DIR`/SQLite.
+- **Productie** (`https://pager.ofloo.io`, na upgrade naar `0.3.4 build 24`): tweede `wait`
+  op hetzelfde `id` geeft geen levering meer.
+
+Let op (deployment, geen bug): een Swarm-service kan na een nodewissel een **gecachte oudere
+image per node** draaien. `docker pull` op één node dekt andere nodes niet; pin daarom bij
+voorkeur de versie-tag/digest. Zie `deploy/docker-stack.yml`.

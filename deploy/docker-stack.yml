@@ -1,15 +1,33 @@
 version: "3.9"
 
-# Updating this service (Swarm tag caching):
+# Updating this service (Swarm tag caching, per node):
 # Swarm reuses a locally present image for a tag and does NOT re-check the
-# registry, so `docker stack deploy` with an unchanged `image:` line can keep
-# running the old build. To pick up a new `latest` (or a re-pushed tag):
+# registry, and every node keeps its own image cache. A task that moves to
+# another node therefore runs whatever digest that node cached for the tag,
+# even if the manager already pulled the new one. `docker pull` on one node
+# does not cover the others.
+#
+# Deterministic update:
 #   1) wait until the build has actually published the tag, then
-#   2) docker pull ofloo/pagermcp:latest            (on the node)
+#   2) pin the version tag in `image:` (for example `ofloo/pagermcp:v0.3.4`)
+#      or the digest `ofloo/pagermcp@sha256:...`; a tag/digest that does not
+#      exist locally is always fetched on whichever node the task lands, and
 #   3) docker service update --force <stack>_pagermcp
-# Pinning the version tag (for example `ofloo/pagermcp:v0.3.4`) is the
-# deterministic alternative: a new tag is always fetched, and the running
-# version is visible in the stack file.
+#
+# If you must use `latest`, pull it on EVERY node that can run the task:
+#   docker node ls                                  # list nodes
+#   docker node ps <node>                           # where it runs
+#   docker pull ofloo/pagermcp:latest               # on each candidate node
+#   docker service update --force <stack>_pagermcp
+#
+# Verify which image the task really runs (this is the ground truth, not the
+# image store):
+#   docker service ps <stack>_pagermcp --no-trunc \
+#     --format '{{.Name}} {{.Node}} {{.CurrentState}} {{.Image}}'
+#   curl -s https://pager.ofloo.io/version          # version + build number
+#
+# Prefer pinning: `latest` can silently roll back to an older cached build when
+# the task moves to a node that has not pulled the new tag yet.
 services:
   pagermcp:
     image: ofloo/pagermcp:latest

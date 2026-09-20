@@ -1,10 +1,11 @@
 # bug-2.md — stale backlog-levering (oude/superseded meldingen komen later als "nieuw")
 
-- **Pager-versie** (`https://pager.ofloo.io/version`): `{"version": "0.3.1", "build": "18"}`
+- **Pager-versie bij melden** (`https://pager.ofloo.io/version`): `{"version": "0.3.1", "build": "18"}`
   (lokaal `http://10.13.17.60:6721/version`: idem)
-- **Component**: `pager_mcp/storage.py` (TTL/backlog) + `server.py` `/wait`
+- **Pager-versie bij afronden** (`https://pager.ofloo.io/version`): `{"version": "0.3.4", "build": "24"}`
+- **Component**: `pager_mcp/storage.py` (TTL/backlog) + `server.py` `/wait` + `plugins/pager.js`
 - **Ernst**: midden / verwarrend
-- **Status**: **OPEN** — semantiek ontbreekt een age-guard
+- **Status**: **RESOLVED in `v0.3.4`** (commit `72ab583`) — server- en clientdeel uitgerold, productie geverifieerd
 
 ## Symptoom
 Een melding die al achterhaald was kwam **later als nieuwe levering** binnen. Concreet: een
@@ -36,4 +37,28 @@ page** die te laat en zonder leeftijdsignaal aankomt.
 ## Aanverwant (nog te overwegen)
 Server-side timeout-melding wanneer een `JOB_ID` wel een `started`-status stuurde maar nooit
 een eindstatus kreeg. Dat vangt een `kill -9`/OOM van de producer, wat geen enkele shell-trap
-kan melden.
+kan melden. (Nog niet geïmplementeerd; vereist server-side job-tracking.)
+
+## Afronding (uitgerold in v0.3.4)
+
+Alle voorgestelde punten zijn geadresseerd:
+
+- **Server — leeftijd in elke levering**: `page_data()` voegt `age_seconds` toe naast `created_at`.
+- **Server — optionele filter**: `GET /wait?max_age_seconds=<n>` levert alleen een page binnen
+  het venster; een page ouder dan `n` wordt overgeslagen **en verbruikt** (zodat de queue niet
+  blijft hangen). Ongeldige waarde → HTTP 400. Zonder parameter verandert er niets.
+- **Client — zichtbaar leeftijdssignaal**: `plugins/pager.js` markeert pages ouder dan 15 min
+  met een `STALE:`-regel.
+- **Client — niet-destructief by default**: de plugin stuurt standaard géén filter, zodat een
+  legitieme backlog-melding (consumer offline) niet stil verdwijnt; `PAGER_MAX_AGE_MS` maakt
+  server-side filteren opt-in.
+- **Documentatie**: RFC-0001 beschrijft de backlog-semantiek en het `max_age_seconds`-filter.
+
+Verificatie:
+
+- **Python-tests** (v0.3.4, 21 totaal): `test_wait_max_age_skips_stale_page`,
+  `test_wait_max_age_expired_page_is_skipped`, `test_wait_max_age_rejects_bad_value`.
+- **Docker E2E** op de gepubliceerde image: levering bevat `age_seconds`; `max_age_seconds=60`
+  werkt; ongeldige waarde → 400.
+- **Productie**: `https://pager.ofloo.io` op `0.3.4 build 24` levert `age_seconds` en geeft 400
+  op een ongeldige `max_age_seconds`.
