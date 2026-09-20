@@ -34,6 +34,10 @@ services:
       MESSAGE_TTL_DAYS: "7"
       MAX_MESSAGES_PER_MAILBOX: "128"
       MAX_MESSAGE_BYTES: "65536"
+    # Swarm templates this: the container hostname becomes the node that runs
+    # the task plus its slot, so `GET /version` (which reports `hostname`)
+    # shows which node answered, not just the container id.
+    hostname: "{{.Node.Hostname}}-{{.Task.Slot}}"
     ports:
       - "${PAGER_PORT:-8080}:8080"
     volumes:
