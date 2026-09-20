@@ -35,7 +35,7 @@ def build_app() -> web.Application:
         return web.json_response({"status": "ok"})
 
     async def version(_: web.Request) -> web.Response:
-        return web.json_response({"version": __version__, "build": __build__})
+        return web.json_response({"version": __version__, "build": __build__, "hostname": os.getenv("HOSTNAME", "")})
 
     async def root(_: web.Request) -> web.Response:
         readme_path = Path(base_dir) / "README.md"

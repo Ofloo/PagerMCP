@@ -25,7 +25,9 @@ Delivery is at-most-once per message `id`: a message handed to a blocked `wait` 
 
 Messages left queued because no consumer was connected are delivered to the next `wait` regardless of age within the message retention window; deliver the queue oldest-first and use `age_seconds`/`created_at` to judge whether an old queued page is still relevant. Clients should surface the age to the operator (or pass `max_age_seconds`) rather than treating an old queued page as fresh.
 
-`GET /version` returns the running semantic version and sequential build number, for example `{ "version": "0.1.0", "build": "42" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection.
+`GET /version` returns the running semantic version, sequential build number, and the container hostname, for example `{ "version": "0.1.0", "build": "42", "hostname": "pztqiyg6f5w6" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection. The hostname identifies which replica/task answered, which is useful under Swarm where several tasks can run behind one endpoint.
+
+The build number is what identifies the exact image. A semantic version alone is ambiguous: `latest` and a release tag of the same release are separate builds with different build numbers (for example `0.3.4` build `23` for the pinned `v0.3.4` tag and `0.3.4` build `24` for `latest`). Whenever a running instance is reported — bug reports, deploy verification, upgrade checks — always record **version and build number** from this endpoint, not the tag name, and re-check it after the fix or roll-out.
 
 `GET /` serves the README rendered as HTML. `GET /rfc` serves this protocol document as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. All are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
 
