@@ -1,4 +1,8 @@
 const DEFAULT_PAGER_URL = "https://pager.ofloo.io"
+// 0 = no server-side age filter: queued pages are still delivered, and old ones
+// are marked STALE. Set PAGER_MAX_AGE_MS to a positive value to drop pages older
+// than that on the server (they are consumed and never delivered).
+const DEFAULT_MAX_AGE_MS = Number(process.env.PAGER_MAX_AGE_MS || 0)
 
 const unwrap = (value) => value?.data ?? value
 
@@ -7,8 +11,29 @@ const sessionIdFromEvent = (event) => {
   return properties.sessionID ?? properties.sessionId ?? properties.session?.id ?? null
 }
 
+const createdAtMs = (page) => {
+  const value = page?.created_at
+  if (typeof value === "number") return value * 1000
+  if (typeof value === "string") {
+    const parsed = Date.parse(value)
+    return Number.isNaN(parsed) ? null : parsed
+  }
+  return null
+}
+
+const ageSeconds = (page) => {
+  if (typeof page?.age_seconds === "number") return Math.max(0, Math.round(page.age_seconds))
+  const created = createdAtMs(page)
+  if (created === null) return null
+  return Math.max(0, Math.round((Date.now() - created) / 1000))
+}
+
 const messageText = (page) => {
   const lines = ["Pagerbericht ontvangen:"]
+  const age = ageSeconds(page)
+  if (age !== null && age >= 900) {
+    lines.push(`STALE: this page is ${age} seconds old and may already be superseded; verify before acting.`)
+  }
   for (const [key, value] of Object.entries(page)) {
     if (value !== undefined && value !== null) lines.push(`${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
   }
@@ -76,7 +101,11 @@ export const PagerPlugin = async ({ client, directory }) => {
           continue
         }
         try {
-          const response = await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait`)
+          const maxAgeSeconds = Math.max(0, Math.floor(DEFAULT_MAX_AGE_MS / 1000))
+          const url = maxAgeSeconds > 0
+            ? `${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait?max_age_seconds=${maxAgeSeconds}`
+            : `${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait`
+          const response = await fetch(url)
           if (!response.ok) throw new Error(`PagerMCP returned HTTP ${response.status}`)
           await deliver(await response.json())
         } catch (error) {

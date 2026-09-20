@@ -103,7 +103,15 @@ def build_app() -> web.Application:
         return web.json_response({"accepted": True, "id": page.id}, status=202)
 
     def page_data(page: Any) -> dict[str, Any]:
-        return {"id": page.id, "created_at": page.created_at, **page.payload}
+        return {"id": page.id, "created_at": page.created_at, "age_seconds": max(0, int(time.time() - page.created_at)), **page.payload}
+
+    def take_fresh(token: str, max_age: float | None) -> Any:
+        while True:
+            page = store.pop(token)
+            if page is None:
+                return None
+            if max_age is None or time.time() - page.created_at <= max_age:
+                return page
 
     async def pending(request: web.Request) -> web.Response:
         token = request.match_info["token"]
@@ -117,7 +125,15 @@ def build_app() -> web.Application:
 
     async def wait(request: web.Request) -> web.Response:
         token = request.match_info["token"]
-        page = store.pop(token)
+        raw_max_age = request.query.get("max_age_seconds")
+        if raw_max_age:
+            try:
+                max_age = float(raw_max_age)
+            except ValueError:
+                raise web.HTTPBadRequest(text="max_age_seconds must be a number")
+        else:
+            max_age = None
+        page = take_fresh(token, max_age)
         if page:
             return web.json_response(page_data(page))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()

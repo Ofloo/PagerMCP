@@ -132,7 +132,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.3"
+        assert data["version"] == "0.3.4"
         assert data["build"] == __build__
     finally:
         await client.close()
@@ -244,6 +244,58 @@ def test_session_key_and_ownership(tmp_path, monkeypatch):
     assert (path.stat().st_uid, path.stat().st_gid) == (os.getuid(), os.getgid())
 
 
+@pytest.mark.asyncio
+async def test_wait_max_age_skips_stale_page(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post("/notify", json={"uuid": token, "message": "stale"})
+        fresh = await client.get(f"/mailboxes/{token}/wait?max_age_seconds=60")
+        data = await fresh.json()
+        assert data["message"] == "stale"
+        assert "age_seconds" in data
+        assert data["age_seconds"] < 60
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert pending["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_max_age_expired_page_is_skipped(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post("/notify", json={"uuid": token, "message": "old"})
+        # max_age_seconds=0 marks the page stale: the waiter skips (and consumes) it
+        resp = await client.get(f"/mailboxes/{token}/wait?max_age_seconds=0")
+        assert resp.status == 408
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert pending["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_max_age_rejects_bad_value(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.get(f"/mailboxes/{token}/wait?max_age_seconds=abc")
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
 def test_pager_plugin_syntax():
     plugin_path = Path("plugins/pager.js")
     assert plugin_path.exists()
@@ -256,3 +308,6 @@ def test_pager_plugin_syntax():
     assert "Do not manually call wait_for_event" in content
     assert "/mailboxes/" in content
     assert "/wait" in content
+    assert "DEFAULT_MAX_AGE_MS" in content
+    assert "max_age_seconds" in content
+    assert "STALE" in content

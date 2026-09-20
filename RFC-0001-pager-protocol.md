@@ -17,11 +17,13 @@ The server does not interpret messages. Payloads may contain `PROJECT`, `JOB_ID`
 
 `POST /notify` accepts JSON and requires `Authorization: Bearer <UUID>`. Accepted messages return `202`; malformed or oversized messages return `400` or `413`; a full mailbox returns `429`.
 
-`GET /mailboxes/{uuid}/messages` lists queued messages. `POST /mailboxes/{uuid}/consume` consumes the oldest message. `GET /mailboxes/{uuid}/wait` blocks until a message is available. Every message response includes `id` and `created_at` as a Unix timestamp, in addition to the submitted payload.
+`GET /mailboxes/{uuid}/messages` lists queued messages. `POST /mailboxes/{uuid}/consume` consumes the oldest message. `GET /mailboxes/{uuid}/wait` blocks until a message is available. Every message response includes `id`, `created_at` (Unix timestamp), and `age_seconds` (whole seconds since the message was accepted), in addition to the submitted payload.
+
+`GET /mailboxes/{uuid}/wait` accepts an optional `max_age_seconds=<n>` query parameter. When given, queued messages older than `n` seconds are skipped (they still expire through the normal message retention) and only a message within the window is returned; an invalid value returns `400`. Without the parameter, the oldest queued message is returned regardless of age.
 
 Delivery is at-most-once per message `id`: a message handed to a blocked `wait` request is removed from the queue in the same operation, so a subsequent `wait` cannot return it again. When `POST /notify` finds one or more blocked `wait` requests on the mailbox, each waiter receives the message once and the message is removed; when no waiter is blocked, the message stays queued and is returned by the next `wait` or `consume`. Clients must treat a repeated `id` as a protocol violation, not as a new event.
 
-Messages left queued because no consumer was connected are delivered to the next `wait` regardless of age within the message retention window; deliver the queue oldest-first and use `created_at` to judge whether an old queued page is still relevant.
+Messages left queued because no consumer was connected are delivered to the next `wait` regardless of age within the message retention window; deliver the queue oldest-first and use `age_seconds`/`created_at` to judge whether an old queued page is still relevant. Clients should surface the age to the operator (or pass `max_age_seconds`) rather than treating an old queued page as fresh.
 
 `GET /version` returns the running semantic version and sequential build number, for example `{ "version": "0.1.0", "build": "42" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection.
 
