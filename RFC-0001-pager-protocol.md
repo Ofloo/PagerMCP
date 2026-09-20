@@ -39,6 +39,16 @@ Messages left queued because no consumer was connected are delivered to the next
 - The wrapper exits with the exit code of the command it ran and never keeps running after the command finishes.
 - `--dry-run` (or `--dry-run=<code>`) prints the notification instead of sending it and exits with the configured code (default `0`).
 
+The wrapper also reports failures of the wrapper itself, so a broken invocation does not disappear silently:
+
+- A command killed by a signal is reported normally with the signal-derived exit code (for example `137` for SIGKILL on the command).
+- On SIGTERM or SIGINT the wrapper sends one failure page with status `failed` and exit code `143` or `130` before exiting.
+- Bad input (unknown option, no mode, missing or unreadable session) sends one failure page with status `failed` and a message describing the problem.
+- Any other unexpected exit before a page was sent triggers one last failure page through an exit trap.
+- The trap does not double-send: once a page has been sent, no second failure page is emitted.
+- Limits: SIGKILL of the wrapper itself cannot be caught and produces no page. A syntax error in the published script itself that occurs before the trap is installed also cannot be caught; CI checks the script with `sh -n`.
+- `--help` prints the script's own header comment, so the option list stays in sync with the code.
+
 ## Limits and retention
 
 Implementations must bound request size, mailbox depth, message retention, and mailbox retention. Defaults are 64 KiB, 128 messages, 7 days, and 30 days. All are configurable through environment variables. A full mailbox rejects new messages; it does not discard existing messages.

@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -131,7 +132,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.2"
+        assert data["version"] == "0.3.3"
         assert data["build"] == __build__
     finally:
         await client.close()
@@ -201,6 +202,34 @@ def test_pager_script_is_generic():
     assert "--tail" in content
     assert "--session" in content
     assert '"exit_code":$exit_code' in content
+
+
+def test_pager_script_reports_own_failures():
+    content = (Path(__file__).parent.parent / "sample" / "pager.sh").read_text(encoding="utf-8")
+    assert "trap 'on_exit' EXIT" in content
+    assert "trap 'on_term' TERM" in content
+    assert "trap 'on_int' INT" in content
+    assert "pager.sh terminated by SIGTERM" in content
+    assert "pager.sh interrupted by SIGINT" in content
+    assert "unknown argument" in content
+    assert "NOTIFIED=1" in content
+    assert "print_help()" in content
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash"])
+def test_pager_script_syntax(shell):
+    script = str(Path(__file__).parent.parent / "sample" / "pager.sh")
+    result = subprocess.run([shell, "-n", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_pager_script_help_prints_header():
+    script = str(Path(__file__).parent.parent / "sample" / "pager.sh")
+    result = subprocess.run(["sh", script, "--help"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "Modes:" in result.stdout
+    assert "--run" in result.stdout
+    assert "--dry-run" in result.stdout
 
 
 def test_session_key_and_ownership(tmp_path, monkeypatch):
