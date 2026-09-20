@@ -1,6 +1,6 @@
 # PagerMCP
 
-PagerMCP is a Dockerized pager and relay MCP server designed for AI coding agents.
+PagerMCP is a Dockerized pager and relay service for asynchronous messages. Mailboxes are opaque UUIDs, so it works equally well for AI coding agents and for ordinary scripts and cron jobs: anything that can issue an HTTP `POST` can page, and anything with a mailbox (an agent plugin, a person, or another script) can be paged. The server relays opaque payloads and does not interpret them.
 
 ## Quickstart
 
