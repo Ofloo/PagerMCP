@@ -25,7 +25,7 @@ version: "3.9"
 services:
   pagermcp:
     # Bump this on every release. Keep it a concrete version tag (or digest).
-    image: ofloo/pagermcp:v0.3.4
+    image: ofloo/pagermcp:v0.3.5
     environment:
       MODE: "server"
       PORT: "8080"
