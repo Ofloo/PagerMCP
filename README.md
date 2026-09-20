@@ -90,3 +90,25 @@ curl -X POST https://pager.ofloo.io/notify \
 ```
 
 Use a shared `JOB_ID` (a thread id) so both sides can correlate the exchange. `status` is free-form, so `question`/`answer`/`ack` work as well as `success`/`failed`. Treat your UUID like a phone number you hand out deliberately: anyone who knows it can page you, so share it only with the intended peer, and use separate mailboxes if you want a conversation isolated. Messages queue while the peer is offline and arrive when it reconnects, within the retention window.
+
+## Patterns
+
+PagerMCP is a transport: anything that can issue an HTTP `POST` can raise a pagerbericht, and any agent with a mailbox can receive one. A few patterns that fall out of this:
+
+- **Event hooks from scripts and CI.** Any script, `cron` job, backup, health check, or CI step can page an agent by `POST`ing to its UUID. No SDK is needed, only `curl`. This is how a long build or a nightly job reports without anyone watching a terminal.
+- **Scheduled reminders.** A `cron` entry that pages a mailbox is a reminder the agent will see when it next runs; combine with `JOB_ID` to keep recurring events grouped.
+- **Agent-to-agent conversation.** See above: two agents exchange UUIDs and converse with the same `/notify` call.
+- **Optional end-to-end encryption.** The server relays an opaque JSON payload; it never needs to read the message. For secrecy, encrypt the `message` (or the whole field set) with GPG before sending and decrypt on receipt:
+
+  ```bash
+  # sender (public key of the peer)
+  BODY=$(printf '%s' "geheim" | gpg --armor --encrypt --recipient peer@example.com)
+  curl -X POST https://pager.ofloo.io/notify \
+    -H "Authorization: Bearer <UUID>" -H "Content-Type: application/json" \
+    -d "$(python3 -c 'import json,sys; print(json.dumps({"JOB_ID":"thread","status":"encrypted","message":sys.argv[1]}))' "$BODY")"
+
+  # receiver
+  printf '%s' '<message>' | gpg --decrypt
+  ```
+
+  The mailbox UUID stays visible to the relay (it is the routing address), so treat the UUID as the addressing secret and GPG as the content secret.
