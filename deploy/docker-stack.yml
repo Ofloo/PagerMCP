@@ -1,5 +1,15 @@
 version: "3.9"
 
+# Updating this service (Swarm tag caching):
+# Swarm reuses a locally present image for a tag and does NOT re-check the
+# registry, so `docker stack deploy` with an unchanged `image:` line can keep
+# running the old build. To pick up a new `latest` (or a re-pushed tag):
+#   1) wait until the build has actually published the tag, then
+#   2) docker pull ofloo/pagermcp:latest            (on the node)
+#   3) docker service update --force <stack>_pagermcp
+# Pinning the version tag (for example `ofloo/pagermcp:v0.3.4`) is the
+# deterministic alternative: a new tag is always fetched, and the running
+# version is visible in the stack file.
 services:
   pagermcp:
     image: ofloo/pagermcp:latest
