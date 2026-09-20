@@ -1,36 +1,31 @@
 version: "3.9"
 
-# Updating this service (Swarm tag caching, per node):
-# Swarm reuses a locally present image for a tag and does NOT re-check the
-# registry, and every node keeps its own image cache. A task that moves to
-# another node therefore runs whatever digest that node cached for the tag,
-# even if the manager already pulled the new one. `docker pull` on one node
-# does not cover the others.
+# Deployment rule: PIN THE VERSION. Do not deploy `:latest`.
 #
-# Deterministic update:
-#   1) wait until the build has actually published the tag, then
-#   2) pin the version tag in `image:` (for example `ofloo/pagermcp:v0.3.4`)
-#      or the digest `ofloo/pagermcp@sha256:...`; a tag/digest that does not
-#      exist locally is always fetched on whichever node the task lands, and
-#   3) docker service update --force <stack>_pagermcp
+# Swarm resolves an image tag to whatever digest each node has cached, and every
+# node keeps its own cache. With `:latest`, a task that moves to another node
+# can silently run an older build, and `docker pull` on one node does not cover
+# the others. A *pinned* tag or digest does not exist on the nodes until the
+# deploy fetches it, so every node gets exactly that build. That makes the
+# per-node cache problem impossible by construction.
 #
-# If you must use `latest`, pull it on EVERY node that can run the task:
-#   docker node ls                                  # list nodes
-#   docker node ps <node>                           # where it runs
-#   docker pull ofloo/pagermcp:latest               # on each candidate node
-#   docker service update --force <stack>_pagermcp
+# Release procedure:
+#   1) publish the release (version tag + `latest`) and wait for the build to
+#      finish,
+#   2) set `image:` below to the new version tag (or its digest),
+#   3) docker stack deploy -c deploy/docker-stack.yml <stack>   (on the manager)
+#   4) docker service update --force --with-registry-auth <stack>_pagermcp
+#   5) verify with:
+#        docker service ps <stack>_pagermcp --no-trunc \
+#          --format '{{.Name}} {{.Node}} {{.CurrentState}} {{.Image}}'
+#        curl -s https://pager.ofloo.io/version      # version + build number
 #
-# Verify which image the task really runs (this is the ground truth, not the
-# image store):
-#   docker service ps <stack>_pagermcp --no-trunc \
-#     --format '{{.Name}} {{.Node}} {{.CurrentState}} {{.Image}}'
-#   curl -s https://pager.ofloo.io/version          # version + build number
-#
-# Prefer pinning: `latest` can silently roll back to an older cached build when
-# the task moves to a node that has not pulled the new tag yet.
+# `latest` may still be published for people who run it locally, but the
+# production stack must not reference it.
 services:
   pagermcp:
-    image: ofloo/pagermcp:latest
+    # Bump this on every release. Keep it a concrete version tag (or digest).
+    image: ofloo/pagermcp:v0.3.4
     environment:
       MODE: "server"
       PORT: "8080"
