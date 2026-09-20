@@ -70,3 +70,23 @@ cp plugins/pager.js ~/.config/opencode/plugins/pager.js
 The client reads or creates the current session key in `.pager_session` and repairs its ownership. Run the client with `--user "$(id -u):$(id -g)"` so the mounted project file belongs to the host user. `PAGER_UID` and `PAGER_GID` can override the ownership when the container must run as root.
 
 Restart OpenCode after installing or updating the plugin. A successful load is written to the OpenCode log as `Pager Plugin loaded for <project-directory>`. The plugin also adds automatic system guidance explaining how the AI should interpret pagerberichten. The default PagerMCP URL is `https://pager.ofloo.io`, so no environment variable is required. Set `PAGER_URL` only when using another server. You may also set `PAGER_SESSION_FILE` or `PAGER_SESSION_ID`. The plugin reads the UUID from each project's `.pager_session`, reconnects after errors, and logs failures through OpenCode without polling PagerMCP.
+
+## Agent-to-agent messaging
+
+Every participant has their own UUID, like a phone number: your mailbox address is your number, and anyone who has it can page you. Two agents (or a person and an agent) can therefore message each other directly once they exchange numbers. The sender `POST`s to the other's UUID, and the other's plugin delivers it as a normal notification. There is no registration, directory, or address book; the number is the whole address.
+
+To start a conversation, exchange numbers once (any channel will do), then send and reply:
+
+```bash
+# Agent A sends to B's number
+curl -X POST https://pager.ofloo.io/notify \
+  -H "Authorization: Bearer <B-UUID>" -H "Content-Type: application/json" \
+  -d '{"JOB_ID": "migratie-vraag", "status": "question", "message": "Welke dataset moet eerst?"}'
+
+# Agent B replies to A's number
+curl -X POST https://pager.ofloo.io/notify \
+  -H "Authorization: Bearer <A-UUID>" -H "Content-Type: application/json" \
+  -d '{"JOB_ID": "migratie-vraag", "status": "answer", "message": "Eerst de home-datasets."}'
+```
+
+Use a shared `JOB_ID` (a thread id) so both sides can correlate the exchange. `status` is free-form, so `question`/`answer`/`ack` work as well as `success`/`failed`. Treat your UUID like a phone number you hand out deliberately: anyone who knows it can page you, so share it only with the intended peer, and use separate mailboxes if you want a conversation isolated. Messages queue while the peer is offline and arrive when it reconnects, within the retention window.
