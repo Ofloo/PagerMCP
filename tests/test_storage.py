@@ -394,6 +394,9 @@ def test_plugin_acknowledges_and_scopes_sessions():
     # self-provision the mailbox so delivery does not depend on the MCP client
     assert "ensureToken" in content
     assert "/mailboxes" in content
+    # redelivered (at-least-once) pages must not prompt the session twice
+    assert "deliveredIds" in content
+    assert "rememberDelivered" in content
 
 
 def test_client_waits_in_bounded_slices_and_acks():

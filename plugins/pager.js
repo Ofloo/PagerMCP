@@ -46,6 +46,17 @@ export const PagerPlugin = async ({ client, directory }) => {
   const configuredSession = process.env.PAGER_SESSION_ID || null
   let activeSession = configuredSession
   let knownSessions = new Set()
+  // Ids already handed to the session. Delivery is at-least-once: if the server
+  // did not see our ack (transient 503, network hiccup) it re-sends the same page.
+  // Re-ack it but do not prompt the session twice.
+  const deliveredIds = new Set()
+  const deliveredOrder = []
+  const rememberDelivered = (id) => {
+    if (!id || deliveredIds.has(id)) return
+    deliveredIds.add(id)
+    deliveredOrder.push(id)
+    if (deliveredOrder.length > 512) deliveredIds.delete(deliveredOrder.shift())
+  }
   let stopped = false
   let running = false
 
@@ -151,7 +162,13 @@ export const PagerPlugin = async ({ client, directory }) => {
           const response = await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait?${params.toString()}`)
           if (response.status === 408) continue // normal idle timeout: poll again at once
           if (!response.ok) throw new Error(`PagerMCP returned HTTP ${response.status}`)
-          await deliver(token, await response.json())
+          const page = await response.json()
+          if (page?.id && deliveredIds.has(page.id)) {
+            await ack(token, page.id) // duplicate redelivery: drop it, do not re-prompt
+            continue
+          }
+          await deliver(token, page)
+          rememberDelivered(page?.id)
         } catch (error) {
           await client.app.log({ body: { service: "pager-plugin", level: "warn", message: String(error) } }).catch(() => {})
           await new Promise((resolve) => setTimeout(resolve, 5000))
