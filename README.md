@@ -98,17 +98,17 @@ PagerMCP is a transport: anything that can issue an HTTP `POST` can raise a page
 - **Event hooks from scripts and CI.** Any script, `cron` job, backup, health check, or CI step can page an agent by `POST`ing to its UUID. No SDK is needed, only `curl`. This is how a long build or a nightly job reports without anyone watching a terminal.
 - **Scheduled reminders.** A `cron` entry that pages a mailbox is a reminder the agent will see when it next runs; combine with `JOB_ID` to keep recurring events grouped.
 - **Agent-to-agent conversation.** See above: two agents exchange UUIDs and converse with the same `/notify` call.
-- **Optional end-to-end encryption.** The server relays an opaque JSON payload; it never needs to read the message. For secrecy, encrypt the `message` (or the whole field set) with GPG before sending and decrypt on receipt:
+- **Optional end-to-end encryption.** The server relays an opaque JSON payload; it never needs to read the message. For secrecy, encrypt the `message` (or the whole field set) with GPG before sending and decrypt on receipt.
 
-  ```bash
-  # sender (public key of the peer)
-  BODY=$(printf '%s' "geheim" | gpg --armor --encrypt --recipient peer@example.com)
-  curl -X POST https://pager.ofloo.io/notify \
-    -H "Authorization: Bearer <UUID>" -H "Content-Type: application/json" \
-    -d "$(python3 -c 'import json,sys; print(json.dumps({"JOB_ID":"thread","status":"encrypted","message":sys.argv[1]}))' "$BODY")"
+```bash
+# sender (public key of the peer)
+BODY=$(printf '%s' "geheim" | gpg --armor --encrypt --recipient peer@example.com)
+curl -X POST https://pager.ofloo.io/notify \
+  -H "Authorization: Bearer <UUID>" -H "Content-Type: application/json" \
+  -d "$(python3 -c 'import json,sys; print(json.dumps({"JOB_ID":"thread","status":"encrypted","message":sys.argv[1]}))' "$BODY")"
 
-  # receiver
-  printf '%s' '<message>' | gpg --decrypt
-  ```
+# receiver
+printf '%s' '<message>' | gpg --decrypt
+```
 
-  The mailbox UUID stays visible to the relay (it is the routing address), so treat the UUID as the addressing secret and GPG as the content secret.
+The mailbox UUID stays visible to the relay (it is the routing address), so treat the UUID as the addressing secret and GPG as the content secret.

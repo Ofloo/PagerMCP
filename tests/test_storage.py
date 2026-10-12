@@ -215,6 +215,9 @@ async def test_root_serves_readme_as_html():
         assert "When to use PagerMCP" in body
         assert "<style>" in body
         assert "<table>" in body
+        # fenced blocks must render as code, never leak literal fences
+        assert "```" not in body
+        assert 'class="language-bash"' in body
         assert "max-age=3600" in resp.headers["Cache-Control"]
     finally:
         await client.close()
