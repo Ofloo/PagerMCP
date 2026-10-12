@@ -133,7 +133,8 @@ export const PagerPlugin = async ({ client, directory }) => {
       // promptAsync hands the message to opencode and returns at once. The
       // synchronous prompt would block this loop for the whole agent turn, so the
       // ack (and the queue removal) would wait until the reply finished.
-      const send = client.session.promptAsync ?? client.session.prompt
+      const session = client.session
+      const send = session.promptAsync ? session.promptAsync.bind(session) : session.prompt.bind(session)
       const response = await send({
         path: { id: sessionId },
         body: { parts: [{ type: "text", text: messageText(page) }] },
