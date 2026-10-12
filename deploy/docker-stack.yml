@@ -25,7 +25,7 @@ version: "3.9"
 services:
   pagermcp:
     # Bump this on every release. Keep it a concrete version tag (or digest).
-    image: ofloo/pagermcp:v0.3.5
+    image: ofloo/pagermcp:v0.3.6
     environment:
       MODE: "server"
       PORT: "8080"
@@ -34,6 +34,10 @@ services:
       MESSAGE_TTL_DAYS: "7"
       MAX_MESSAGES_PER_MAILBOX: "128"
       MAX_MESSAGE_BYTES: "65536"
+      # Cap a blocking wait below the reverse proxy's idle timeout (~120s) so a
+      # client gets a clean 408 and re-polls instead of a proxy 504. Clients that
+      # pass ?timeout_seconds= override this per request.
+      WAIT_TIMEOUT_SECONDS: "90"
     ports:
       - "${PAGER_PORT:-8080}:8080"
     volumes:

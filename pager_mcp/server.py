@@ -73,6 +73,30 @@ def build_app() -> web.Application:
         store.touch(token)
         return web.json_response({"uuid": token})
 
+    def page_data(page: Any) -> dict[str, Any]:
+        return {"id": page.id, "created_at": page.created_at, "age_seconds": max(0, int(time.time() - page.created_at)), **page.payload}
+
+    def take_fresh(token: str, max_age: float | None) -> Any:
+        # Return the oldest queued page within the age window *without removing it*.
+        # Pages outside the window are discarded (removed) so a stale page cannot
+        # pin the head of the queue forever. Removal of a delivered page is the
+        # client's job via /ack, which makes delivery at-least-once: a waiter that
+        # dies before acknowledging cannot swallow the page.
+        now = time.time()
+        for page in store.pending(token):
+            if max_age is not None and now - page.created_at > max_age:
+                store.remove(page.id)
+                continue
+            return page
+        return None
+
+    def drop_waiter(token: str, future: asyncio.Future[dict[str, Any]]) -> None:
+        bucket = waiters.get(token)
+        if bucket and future in bucket:
+            bucket.remove(future)
+        if bucket is not None and not bucket:
+            waiters.pop(token, None)
+
     async def notify(request: web.Request) -> web.Response:
         if request.content_length and request.content_length > max_bytes:
             raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=request.content_length)
@@ -93,38 +117,44 @@ def build_app() -> web.Application:
         page = store.enqueue(token, payload)
         if page is None:
             raise web.HTTPTooManyRequests(text="mailbox is full")
-        delivered = False
-        for waiter in waiters.pop(token, []):
-            if not waiter.done():
-                waiter.set_result(page_data(page))
-                delivered = True
-        if delivered:
-            store.remove(page.id)
+        data = page_data(page)
+        # Wake blocked waiters, but leave the page in the queue. It is removed
+        # only when a waiter acknowledges it, so a connection that dies between
+        # this notify and the response cannot lose the message.
+        for waiter in [w for w in waiters.pop(token, []) if not w.done()]:
+            waiter.set_result(data)
         return web.json_response({"accepted": True, "id": page.id}, status=202)
-
-    def page_data(page: Any) -> dict[str, Any]:
-        return {"id": page.id, "created_at": page.created_at, "age_seconds": max(0, int(time.time() - page.created_at)), **page.payload}
-
-    def take_fresh(token: str, max_age: float | None) -> Any:
-        while True:
-            page = store.pop(token)
-            if page is None:
-                return None
-            if max_age is None or time.time() - page.created_at <= max_age:
-                return page
 
     async def pending(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
         return web.json_response({"messages": [page_data(page) for page in store.pending(token)]})
-
     async def consume(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         page = store.pop(token)
         return web.json_response({"message": (page_data(page) if page else None)})
 
+    async def ack(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        page_id = None
+        if request.can_read_body:
+            try:
+                body = await request.json()
+            except (json.JSONDecodeError, ValueError):
+                body = None
+            if isinstance(body, dict):
+                page_id = body.get("id")
+        if page_id:
+            store.remove(str(page_id))
+        else:
+            oldest = store.pop(token)
+            page_id = oldest.id if oldest else None
+        return web.json_response({"acked": page_id is not None, "id": page_id})
+
     async def wait(request: web.Request) -> web.Response:
         token = request.match_info["token"]
+        store.touch(token)
         raw_max_age = request.query.get("max_age_seconds")
         if raw_max_age:
             try:
@@ -133,18 +163,28 @@ def build_app() -> web.Application:
                 raise web.HTTPBadRequest(text="max_age_seconds must be a number")
         else:
             max_age = None
+        raw_timeout = request.query.get("timeout_seconds")
+        if raw_timeout:
+            try:
+                timeout = float(raw_timeout)
+            except ValueError:
+                raise web.HTTPBadRequest(text="timeout_seconds must be a number")
+        else:
+            timeout = float(os.getenv("WAIT_TIMEOUT_SECONDS", "0")) or None
         page = take_fresh(token, max_age)
         if page:
             return web.json_response(page_data(page))
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         waiters.setdefault(token, []).append(future)
         try:
-            return web.json_response(await asyncio.wait_for(future, float(os.getenv("WAIT_TIMEOUT_SECONDS", "0")) or None))
+            return web.json_response(await asyncio.wait_for(future, timeout))
         except asyncio.TimeoutError:
             raise web.HTTPRequestTimeout(text="wait timed out")
+        finally:
+            drop_waiter(token, future)
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.get("/mailboxes/{token}/wait", wait)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait)])
     return app
 
 

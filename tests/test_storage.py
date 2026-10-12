@@ -1,5 +1,6 @@
 import asyncio
 import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -55,8 +56,12 @@ async def _wait_payload(client, token):
     return await resp.json()
 
 
+async def _ack(client, token, page_id):
+    return await client.post(f"/mailboxes/{token}/ack", json={"id": page_id})
+
+
 @pytest.mark.asyncio
-async def test_wait_does_not_redeliver_consumed_page(monkeypatch):
+async def test_wait_then_ack_removes_page(monkeypatch):
     monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "10")
     app = build_app()
     client = TestClient(TestServer(app))
@@ -71,9 +76,10 @@ async def test_wait_does_not_redeliver_consumed_page(monkeypatch):
         delivered = await waiter
         assert delivered["id"] == page_id
         assert delivered["message"] == "hello"
-        monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
-        second = await client.get(f"/mailboxes/{token}/wait")
-        assert second.status == 408
+        # at-least-once: the page is still queued until it is acknowledged
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert [m["id"] for m in pending["messages"]] == [page_id]
+        assert (await _ack(client, token, page_id)).status == 200
         pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
         assert pending["messages"] == []
     finally:
@@ -81,26 +87,57 @@ async def test_wait_does_not_redeliver_consumed_page(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_wait_delivers_backlog_when_no_waiter(monkeypatch):
-    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "5")
+async def test_wait_without_ack_returns_same_page(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "10")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
         token = (await (await client.post("/mailboxes")).json())["uuid"]
-        accepted = await client.post("/notify", json={"uuid": token, "message": "queued"})
+        accepted = await client.post("/notify", json={"uuid": token, "message": "retry-me"})
         page_id = (await accepted.json())["id"]
-        delivered = await _wait_payload(client, token)
-        assert delivered["id"] == page_id
-        assert delivered["message"] == "queued"
-        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
-        assert pending["messages"] == []
+        first = await _wait_payload(client, token)
+        second = await _wait_payload(client, token)
+        assert first["id"] == page_id
+        assert second["id"] == page_id  # redelivered because it was never acked
     finally:
         await client.close()
 
 
 @pytest.mark.asyncio
-async def test_notify_with_multiple_waiters_delivers_once_per_waiter(monkeypatch):
+async def test_disconnected_waiter_does_not_consume_page(monkeypatch):
+    """A client that drops mid-wait must not swallow a page the server later delivers."""
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "10")
+    app = build_app()
+    server = TestServer(app)
+    client = TestClient(server)
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        writer.write(
+            f"GET /mailboxes/{token}/wait HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        await asyncio.sleep(0.1)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        await asyncio.sleep(0.2)
+        accepted = await client.post("/notify", json={"uuid": token, "message": "survivor"})
+        page_id = (await accepted.json())["id"]
+        pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert [m["id"] for m in pending["messages"]] == [page_id]
+        delivered = await _wait_payload(client, token)
+        assert delivered["id"] == page_id
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_notify_wakes_all_waiters_without_consuming(monkeypatch):
     monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "10")
     app = build_app()
     client = TestClient(TestServer(app))
@@ -113,11 +150,36 @@ async def test_notify_with_multiple_waiters_delivers_once_per_waiter(monkeypatch
         page_id = (await accepted.json())["id"]
         delivered = await asyncio.gather(*waiters)
         assert [page["id"] for page in delivered] == [page_id, page_id]
-        monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0.05")
-        extra = await client.get(f"/mailboxes/{token}/wait")
-        assert extra.status == 408
+        await _ack(client, token, page_id)
         pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
         assert pending["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_seconds_returns_408(monkeypatch):
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.get(f"/mailboxes/{token}/wait?timeout_seconds=0.05")
+        assert resp.status == 408
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_timeout_rejects_bad_value(monkeypatch):
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.get(f"/mailboxes/{token}/wait?timeout_seconds=abc")
+        assert resp.status == 400
     finally:
         await client.close()
 
@@ -132,7 +194,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.5"
+        assert data["version"] == "0.3.6"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -259,6 +321,7 @@ async def test_wait_max_age_skips_stale_page(monkeypatch):
         assert data["message"] == "stale"
         assert "age_seconds" in data
         assert data["age_seconds"] < 60
+        await _ack(client, token, data["id"])
         pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
         assert pending["messages"] == []
     finally:
@@ -274,7 +337,7 @@ async def test_wait_max_age_expired_page_is_skipped(monkeypatch):
     try:
         token = (await (await client.post("/mailboxes")).json())["uuid"]
         await client.post("/notify", json={"uuid": token, "message": "old"})
-        # max_age_seconds=0 marks the page stale: the waiter skips (and consumes) it
+        # max_age_seconds=0 marks the page stale: the waiter skips (and drops) it
         resp = await client.get(f"/mailboxes/{token}/wait?max_age_seconds=0")
         assert resp.status == 408
         pending = await (await client.get(f"/mailboxes/{token}/messages")).json()
@@ -312,3 +375,27 @@ def test_pager_plugin_syntax():
     assert "DEFAULT_MAX_AGE_MS" in content
     assert "max_age_seconds" in content
     assert "STALE" in content
+
+
+def test_plugin_acknowledges_and_scopes_sessions():
+    content = Path("plugins/pager.js").read_text(encoding="utf-8")
+    # at-least-once: acknowledge only after a successful hand-off
+    assert "/ack" in content
+    assert "page kept queued" in content
+    # bounded long-poll instead of hanging into a proxy 504
+    assert "timeout_seconds" in content
+    assert "response.status === 408" in content
+    # never deliver into another directory or a sub-agent session
+    assert "parentID" in content
+    assert "inDirectory" in content
+    # self-provision the mailbox so delivery does not depend on the MCP client
+    assert "ensureToken" in content
+    assert "/mailboxes" in content
+
+
+def test_client_waits_in_bounded_slices_and_acks():
+    content = (Path(__file__).parent.parent / "pager_mcp" / "client.py").read_text(encoding="utf-8")
+    assert "wait_for_page" in content
+    assert "timeout_seconds" in content
+    assert "/ack" in content
+    assert "PAGER_MCP_WAIT_SECONDS" in content

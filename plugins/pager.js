@@ -1,8 +1,13 @@
 const DEFAULT_PAGER_URL = "https://pager.ofloo.io"
+import { chmodSync } from "node:fs"
 // 0 = no server-side age filter: queued pages are still delivered, and old ones
-// are marked STALE. Set PAGER_MAX_AGE_MS to a positive value to drop pages older
-// than that on the server (they are consumed and never delivered).
+// are marked STALE. Set PAGER_MAX_AGE_MS to a positive value to expire pages
+// older than that on the server (they are dropped and never delivered).
 const DEFAULT_MAX_AGE_MS = Number(process.env.PAGER_MAX_AGE_MS || 0)
+// Server-side long-poll window. It MUST be shorter than the reverse proxy's idle
+// timeout (observed at 120s), otherwise every poll dies as a proxy 504 instead of
+// a clean 408 and the client logs a warning every cycle.
+const WAIT_SECONDS = Number(process.env.PAGER_WAIT_SECONDS || 55)
 
 const unwrap = (value) => value?.data ?? value
 
@@ -11,21 +16,11 @@ const sessionIdFromEvent = (event) => {
   return properties.sessionID ?? properties.sessionId ?? properties.session?.id ?? null
 }
 
-const createdAtMs = (page) => {
-  const value = page?.created_at
-  if (typeof value === "number") return value * 1000
-  if (typeof value === "string") {
-    const parsed = Date.parse(value)
-    return Number.isNaN(parsed) ? null : parsed
-  }
-  return null
-}
-
 const ageSeconds = (page) => {
   if (typeof page?.age_seconds === "number") return Math.max(0, Math.round(page.age_seconds))
-  const created = createdAtMs(page)
-  if (created === null) return null
-  return Math.max(0, Math.round((Date.now() - created) / 1000))
+  const created = page?.created_at
+  const ms = typeof created === "number" ? created * 1000 : typeof created === "string" ? Date.parse(created) : NaN
+  return Number.isNaN(ms) ? null : Math.max(0, Math.round((Date.now() - ms) / 1000))
 }
 
 const messageText = (page) => {
@@ -50,6 +45,7 @@ export const PagerPlugin = async ({ client, directory }) => {
   const sessionPath = process.env.PAGER_SESSION_FILE || `${directory}/.pager_session`
   const configuredSession = process.env.PAGER_SESSION_ID || null
   let activeSession = configuredSession
+  let knownSessions = new Set()
   let stopped = false
   let running = false
 
@@ -68,26 +64,74 @@ export const PagerPlugin = async ({ client, directory }) => {
     return token || null
   }
 
-  const findSession = async () => {
-    if (activeSession) return activeSession
+  const ensureToken = async () => {
+    const existing = await readToken()
+    if (existing) return existing
+    // Provision the mailbox if no client (docker MCP / pager.sh) has yet created
+    // .pager_session, so background delivery does not depend on the MCP tool.
+    try {
+      const response = await fetch(`${pagerUrl}/mailboxes`, { method: "POST" })
+      if (!response.ok) return null
+      const created = (await response.json())?.uuid
+      if (!created) return null
+      await Bun.write(sessionPath, created + "\n")
+      try {
+        chmodSync(sessionPath, 0o600)
+      } catch {}
+      return created
+    } catch {
+      return null
+    }
+  }
+
+  const normalize = (value) => String(value).replace(/\\/g, "/").replace(/\/+$/, "")
+  const inDirectory = (session) => {
+    const dir = session?.directory ?? session?.path?.directory
+    return typeof dir === "string" && normalize(dir) === normalize(directory)
+  }
+
+  const listLocalSessions = async () => {
     const response = unwrap(await client.session.list())
     const sessions = Array.isArray(response) ? response : response?.sessions ?? []
-    const candidate = sessions
-      .filter((session) => session.id)
-      .sort((left, right) => String(right.time?.updated ?? right.updated ?? "").localeCompare(String(left.time?.updated ?? left.updated ?? "")))[0]
+    return sessions.filter((session) => session.id && !session.parentID && inDirectory(session))
+  }
+
+  const findSession = async () => {
+    if (activeSession && knownSessions.has(activeSession)) return activeSession
+    // Only ever target a top-level session in THIS project directory, so a page is
+    // never delivered into another project's tab or a sub-agent conversation.
+    const local = await listLocalSessions()
+    knownSessions = new Set(local.map((session) => session.id))
+    const candidate = local.sort((left, right) => String(right.time?.updated ?? right.updated ?? "").localeCompare(String(left.time?.updated ?? left.updated ?? "")))[0]
     activeSession = candidate?.id ?? null
     return activeSession
   }
 
-  const deliver = async (page) => {
-    const sessionId = await findSession()
-    if (!sessionId) return
-    await client.session.prompt({
-      path: { id: sessionId },
-      body: {
-        parts: [{ type: "text", text: messageText(page) }],
-      },
-    })
+  const ack = async (token, pageId) => {
+    await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/ack`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pageId }),
+    }).catch(() => {})
+  }
+
+  const deliver = async (token, page) => {
+    try {
+      const sessionId = await findSession()
+      if (!sessionId) throw new Error("no active session in this directory; page left queued")
+      const response = await client.session.prompt({
+        path: { id: sessionId },
+        body: { parts: [{ type: "text", text: messageText(page) }] },
+      })
+      const error = unwrap(response)?.info?.error ?? response?.error
+      if (error) throw new Error(`session prompt failed: ${JSON.stringify(error)}`)
+      // Acknowledge only after a successful hand-off. If this throws, the page
+      // stays queued and the next poll retries it instead of losing it.
+      await ack(token, page.id)
+    } catch (error) {
+      await client.app.log({ body: { service: "pager-plugin", level: "warn", message: `Pager delivery failed, page kept queued: ${String(error)}` } }).catch(() => {})
+      throw error
+    }
   }
 
   const waitForPager = async () => {
@@ -95,19 +139,19 @@ export const PagerPlugin = async ({ client, directory }) => {
     running = true
     try {
       while (!stopped) {
-        const token = await readToken()
+        const token = await ensureToken()
         if (!token) {
           await new Promise((resolve) => setTimeout(resolve, 5000))
           continue
         }
         try {
           const maxAgeSeconds = Math.max(0, Math.floor(DEFAULT_MAX_AGE_MS / 1000))
-          const url = maxAgeSeconds > 0
-            ? `${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait?max_age_seconds=${maxAgeSeconds}`
-            : `${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait`
-          const response = await fetch(url)
+          const params = new URLSearchParams({ timeout_seconds: String(Math.max(1, Math.floor(WAIT_SECONDS))) })
+          if (maxAgeSeconds > 0) params.set("max_age_seconds", String(maxAgeSeconds))
+          const response = await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait?${params.toString()}`)
+          if (response.status === 408) continue // normal idle timeout: poll again at once
           if (!response.ok) throw new Error(`PagerMCP returned HTTP ${response.status}`)
-          await deliver(await response.json())
+          await deliver(token, await response.json())
         } catch (error) {
           await client.app.log({ body: { service: "pager-plugin", level: "warn", message: String(error) } }).catch(() => {})
           await new Promise((resolve) => setTimeout(resolve, 5000))
@@ -125,9 +169,17 @@ export const PagerPlugin = async ({ client, directory }) => {
       output.system.push(PAGER_SYSTEM_INSTRUCTION)
     },
     event: async ({ event }) => {
-      const eventSession = sessionIdFromEvent(event)
-      if (eventSession) activeSession = eventSession
-      if (event.type === "session.deleted" && eventSession === activeSession) activeSession = null
+      const info = event.properties?.info
+      if (info?.id && inDirectory(info) && !info.parentID) {
+        knownSessions.add(info.id)
+        if (event.type !== "session.deleted") activeSession = info.id
+      }
+      const direct = sessionIdFromEvent(event)
+      if (direct && knownSessions.has(direct)) activeSession = direct
+      if (event.type === "session.deleted" && (info?.id ?? direct) === activeSession) {
+        activeSession = null
+        if (info?.id) knownSessions.delete(info.id)
+      }
     },
   }
 }

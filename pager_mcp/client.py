@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -68,6 +69,33 @@ def request(path: str, method: str = "GET", body: dict | None = None) -> dict:
         return json.load(response)
 
 
+def wait_for_page(token: str) -> dict:
+    """Block in bounded slices, then acknowledge so the page is removed.
+
+    Delivery is at-least-once: /wait hands out a page without removing it, and
+    the page leaves the queue only after /ack. If this client (or the network)
+    dies before the ack, the page stays queued and the next wait returns it,
+    instead of vanishing into a connection nobody can read. The wait is sliced
+    so no single request outlives a reverse proxy's idle timeout.
+    """
+    slice_seconds = int(os.getenv("PAGER_MCP_WAIT_SLICE_SECONDS", "55"))
+    deadline = time.monotonic() + float(os.getenv("PAGER_MCP_WAIT_SECONDS", "1800"))
+    url = "/mailboxes/" + urllib.parse.quote(token, safe="")
+    query = f"?timeout_seconds={slice_seconds}" if slice_seconds > 0 else ""
+    while True:
+        try:
+            page = request(url + "/wait" + query)
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code != 408:
+                raise
+            if time.monotonic() >= deadline:
+                return {"timeout": True, "message": "no page within the wait window; call wait_for_event again"}
+    if isinstance(page, dict) and page.get("id"):
+        request(url + "/ack", method="POST", body={"id": page["id"]})
+    return page
+
+
 def check_version() -> None:
     try:
         remote = request("/version")
@@ -90,7 +118,7 @@ def main() -> None:
         elif method == "tools/list":
             result = {"tools": [{"name": "wait_for_event", "description": "Wait for the next page in the session mailbox without polling.", "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}}]}
         elif method == "tools/call" and message.get("params", {}).get("name") == "wait_for_event":
-            result = {"content": [{"type": "text", "text": json.dumps(request("/mailboxes/" + urllib.parse.quote(token, safe="") + "/wait"))}], "isError": False}
+            result = {"content": [{"type": "text", "text": json.dumps(wait_for_page(token))}], "isError": False}
         else:
             result = {}
         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
