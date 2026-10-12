@@ -130,7 +130,11 @@ export const PagerPlugin = async ({ client, directory }) => {
     try {
       const sessionId = await findSession()
       if (!sessionId) throw new Error("no active session in this directory; page left queued")
-      const response = await client.session.prompt({
+      // promptAsync hands the message to opencode and returns at once. The
+      // synchronous prompt would block this loop for the whole agent turn, so the
+      // ack (and the queue removal) would wait until the reply finished.
+      const send = client.session.promptAsync ?? client.session.prompt
+      const response = await send({
         path: { id: sessionId },
         body: { parts: [{ type: "text", text: messageText(page) }] },
       })
