@@ -1,10 +1,10 @@
 # bug-3.md — pagerbericht verdwijnt uit de queue zonder aan de sessie geleverd te worden
 
 - **Pager-versie bij melden** (`https://pager.ofloo.io/version`): `{"version": "0.3.5", "build": "25"}`
-- **Pager-versie bij afronden** (`https://pager.ofloo.io/version`): zie afronding onderaan (v0.3.6)
+- **Pager-versie bij afronden** (`https://pager.ofloo.io/version`): `{"version": "0.3.6", "build": "27", "hostname": "8265f0018e3d"}`
 - **Component**: `pager_mcp/server.py` (`/wait`, `/notify`) + `pager_mcp/storage.py` + `plugins/pager.js` + `pager_mcp/client.py`
 - **Ernst**: hoog / reproduceerbaar
-- **Status**: **OPEN** — gemeld door de Privaxy-agent; fix in v0.3.6 (nog niet uitgerold)
+- **Status**: **RESOLVED in `v0.3.6`** (commit `91afa20`) — uitgerold en live geverifieerd op `0.3.6 build 27`
 
 ## Versiecheck (verplicht, altijd actief uitvoeren)
 
@@ -86,6 +86,20 @@ achter (bericht weg) op 0.3.5. De proxy-504 trad op bij exact 120,07 s.
 
 ## Afronding
 
-Nog uit te rollen. Zodra `https://pager.ofloo.io/version` op v0.3.6 (buildnummer noteeren)
-staat: opnieuw een dode-waiter-scenario plus een echte `pager.sh --run`-melding testen en hier
-de productieversie/build vastleggen.
+Uitgerold en live geverifieerd op **`0.3.6` build `27`** (`hostname 8265f0018e3d`), commit `91afa20`.
+
+- **`GET /version`**: `{"version": "0.3.6", "build": "27", "hostname": "8265f0018e3d"}`.
+- **Ack-flow live**: `notify` → `wait?timeout_seconds=10` gaf de page terug; `GET /messages`
+  toonde 1 bericht vóór `ack`; `POST /ack` → `{"acked": true}`; `GET /messages` daarna leeg.
+- **Dode waiter live**: `curl --max-time 1` op `/wait`, daarna `notify` → het bericht bleef in de
+  queue staan (`{"messages": [ ... "live-dead-waiter" ]}`) i.p.v. te verdwijnen. Precies het
+  omgekeerde van de oude 0.3.5-reproductie.
+- **Privaxy-melder**: geïnformeerd op zijn mailbox `cec00bba-…`; hij hertest na de uitrol.
+
+Aanvullend (niet server-side te verifiëren, wel in de plugin): at-least-once kan bij een
+verloren ack een duplicaat geven; de plugin dedupliceert op `id` (`deliveredIds`) en ackt het
+duplicaat opnieuw zonder de sessie nogmaals te prompten (commit `91cf112`).
+
+Let op: de README-renderingfix (`053e1b6`) zit in `v0.3.7`; productie draait op dit moment
+`0.3.6` en toont de README dus nog met het oude gebrek tot `v0.3.7` is uitgerold.
+
