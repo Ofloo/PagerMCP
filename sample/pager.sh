@@ -223,14 +223,14 @@ if [ -n "$RUN" ]; then
 
     # A log path that cannot be created must not abort the whole run with a bare
     # redirection failure (that produced exit 2, no log, and no command output).
-    # If the requested log is unwritable, fall back to a fresh mktemp -d so the
+    # If the requested log is unwritable, fall back to a fresh mktemp file so the
     # output is still captured, then to /dev/null only if even that fails.
     if [ "$LOG" != "/dev/null" ]; then
         if ! mkdir -p "$(dirname "$LOG")" 2>/dev/null || ! : >"$LOG" 2>/dev/null; then
             requested_log="$LOG"
-            fallback_dir=$(mktemp -d 2>/dev/null) || fallback_dir=
-            if [ -n "$fallback_dir" ]; then
-                LOG="$fallback_dir/pager.log"
+            fallback_log=$(mktemp 2>/dev/null) || fallback_log=
+            if [ -n "$fallback_log" ]; then
+                LOG="$fallback_log"
                 echo "pager.sh: cannot write log '$requested_log'; logging to '$LOG'" >&2
             else
                 echo "pager.sh: cannot write log '$requested_log'; continuing without log capture" >&2
