@@ -60,6 +60,12 @@ def build_app() -> web.Application:
             raise web.HTTPNotFound()
         return web.FileResponse(rfc_path, headers={**static_cache, "Content-Type": "text/plain"})
 
+    async def privacy(_: web.Request) -> web.Response:
+        privacy_path = Path(__file__).parent / "PRIVACY.md"
+        if not privacy_path.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(privacy_path, headers={**static_cache, "Content-Type": "text/plain; charset=utf-8"})
+
     async def sample(request: web.Request) -> web.Response:
         name = request.match_info.get("name", "")
         sample_dir = os.path.join(base_dir, "sample")
@@ -184,7 +190,7 @@ def build_app() -> web.Application:
             drop_waiter(token, future)
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait)])
     return app
 
 

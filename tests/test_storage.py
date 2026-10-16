@@ -194,7 +194,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.7"
+        assert data["version"] == "0.3.8"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -233,6 +233,24 @@ async def test_rfc_endpoint_serves_rfc_as_plain_text():
         assert resp.status == 200
         assert "text/plain" in resp.headers["Content-Type"]
         assert "RFC-0001: Pager Protocol" in await resp.text()
+        assert "max-age=3600" in resp.headers["Cache-Control"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_privacy_endpoint_serves_privacy_as_plain_text():
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/privacy")
+        assert resp.status == 200
+        assert "text/plain" in resp.headers["Content-Type"]
+        body = await resp.text()
+        assert "Privacy" in body
+        assert "logt niets" in body
+        assert "UUID" in body
         assert "max-age=3600" in resp.headers["Cache-Control"]
     finally:
         await client.close()

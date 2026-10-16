@@ -112,3 +112,7 @@ printf '%s' '<message>' | gpg --decrypt
 ```
 
 The mailbox UUID stays visible to the relay (it is the routing address), so treat the UUID as the addressing secret and GPG as the content secret.
+
+## Privacy
+
+PagerMCP logs nothing, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.
