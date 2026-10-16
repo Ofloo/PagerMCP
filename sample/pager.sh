@@ -221,6 +221,15 @@ if [ -n "$RUN" ]; then
     [ -z "$LOG" ] && LOG=/dev/null
     [ -z "$JOB_ID" ] && JOB_ID="run"
 
+    # A log path that cannot be created must not abort the whole run with a bare
+    # redirection failure (that produced exit 2, no log, and no command output).
+    if [ "$LOG" != "/dev/null" ]; then
+        if ! mkdir -p "$(dirname "$LOG")" 2>/dev/null || ! : >"$LOG" 2>/dev/null; then
+            echo "pager.sh: cannot write log '$LOG'; continuing without log capture" >&2
+            LOG=/dev/null
+        fi
+    fi
+
     if [ "$DRY_RUN_SET" -eq 1 ]; then
         if [ "$DRY_RUN" -eq 0 ]; then sim_status="$SUCCESS_STATUS"; else sim_status="$FAIL_STATUS"; fi
         echo "$(build_payload "$sim_status" "$MESSAGE" "" "$DRY_RUN")"

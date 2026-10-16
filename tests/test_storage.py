@@ -298,6 +298,8 @@ def test_pager_script_reports_own_failures():
     assert "unknown argument" in content
     assert "NOTIFIED=1" in content
     assert "print_help()" in content
+    assert "cannot write log" in content
+    assert 'mkdir -p "$(dirname "$LOG")"' in content
 
 
 @pytest.mark.parametrize("shell", ["sh", "bash"])
