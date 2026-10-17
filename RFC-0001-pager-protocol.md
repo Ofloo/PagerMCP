@@ -59,7 +59,7 @@ The wrapper also reports failures of the wrapper itself, so a broken invocation 
 
 ## Limits and retention
 
-Implementations must bound request size, mailbox depth, message retention, and mailbox retention. Defaults are 64 KiB, 128 messages, 7 days, and 30 days. All are configurable through environment variables. A full mailbox rejects new messages; it does not discard existing messages.
+Implementations must bound request size, mailbox depth, message retention, and mailbox retention. Defaults are 64 KiB, 128 messages, 7 days, and 30 days. All are configurable through environment variables. A full mailbox rejects new messages; it does not discard existing messages. A live SSE connection's push queue is bounded too (`SSE_QUEUE_MAX`, default 256); if it overflows the stream is closed and the client reconnects and replays the backlog, so overflow costs a reconnect, never a message.
 
 ## Persistence
 
@@ -69,6 +69,8 @@ Without `DATA_DIR`, storage is in memory. With `DATA_DIR`, SQLite persists mailb
 
 At startup, the client reads the current session key from `.pager_session`; if absent or invalid, it requests a mailbox and creates the file with mode `0600`. The client repairs file ownership using `PAGER_UID` and `PAGER_GID`, defaulting to its current UID and GID. For Docker clients, run with `--user "$(id -u):$(id -g)"` so the mounted project file is readable by the host AI client. The file must be excluded by `.gitignore`. Queued messages are available immediately after reconnecting.
 
+A client may receive through `GET /wait` (long-poll) or `GET /events` (SSE push); the two are interchangeable and deliver the same at-least-once messages, and a client should reconnect either after a failure. The bundled plugin tries SSE and falls back to long-poll by itself (`PAGER_TRANSPORT=auto`, or `sse`/`longpoll` to force one).
+
 ## Configuration
 
-`MODE`, `HOST`, `PORT`, `SERVER_URL`, `SERVER_HOST`, `SERVER_PORT`, `DATA_DIR`, `MAILBOX_TTL_DAYS`, `MESSAGE_TTL_DAYS`, `MAX_MESSAGES_PER_MAILBOX`, `MAX_MESSAGE_BYTES`, and `WAIT_TIMEOUT_SECONDS` are externally configurable.
+`MODE`, `HOST`, `PORT`, `SERVER_URL`, `SERVER_HOST`, `SERVER_PORT`, `DATA_DIR`, `MAILBOX_TTL_DAYS`, `MESSAGE_TTL_DAYS`, `MAX_MESSAGES_PER_MAILBOX`, `MAX_MESSAGE_BYTES`, `WAIT_TIMEOUT_SECONDS`, `SSE_KEEPALIVE_SECONDS`, and `SSE_QUEUE_MAX` are externally configurable on the server. The client honours `PAGER_URL`, `PAGER_SESSION_FILE`, `PAGER_SESSION_ID`, `PAGER_MAX_AGE_MS`, `PAGER_WAIT_SECONDS`, and `PAGER_TRANSPORT`.
