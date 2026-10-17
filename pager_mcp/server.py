@@ -24,10 +24,25 @@ def env_float(name: str, default: float) -> float:
     return value * 86400 if name.endswith("_DAYS") else value
 
 
+class Subscriber:
+    """A live SSE connection: a bounded queue of pages plus an overflow flag."""
+
+    __slots__ = ("queue", "overflowed")
+
+    def __init__(self, maxsize: int) -> None:
+        self.queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=maxsize)
+        self.overflowed = asyncio.Event()
+
+
+def sse_frame(data: dict[str, Any]) -> bytes:
+    return f"id: {data.get('id', '')}\nevent: page\ndata: {json.dumps(data)}\n\n".encode()
+
+
 def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
     store = MailboxStore(os.getenv("DATA_DIR") or None, env_float("MAILBOX_TTL_DAYS", 30), env_float("MESSAGE_TTL_DAYS", 7), int(os.getenv("MAX_MESSAGES_PER_MAILBOX", "128")))
     waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
+    subscribers: dict[str, set[Subscriber]] = {}
     static_cache = {"Cache-Control": "max-age=3600"}
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -129,6 +144,14 @@ def build_app() -> web.Application:
         # this notify and the response cannot lose the message.
         for waiter in [w for w in waiters.pop(token, []) if not w.done()]:
             waiter.set_result(data)
+        # Push the same page to any live SSE subscribers. A full queue marks the
+        # connection overflowed so it is closed and the client reconnects, which
+        # replays the still-queued page from the backlog.
+        for subscriber in list(subscribers.get(token, ())):
+            try:
+                subscriber.queue.put_nowait(data)
+            except asyncio.QueueFull:
+                subscriber.overflowed.set()
         return web.json_response({"accepted": True, "id": page.id}, status=202)
 
     async def pending(request: web.Request) -> web.Response:
@@ -189,8 +212,51 @@ def build_app() -> web.Application:
         finally:
             drop_waiter(token, future)
 
+    async def events(request: web.Request) -> web.StreamResponse:
+        """Server-Sent Events stream: push each page as it arrives.
+
+        Push is a wake-up, not a new delivery guarantee: the page stays queued
+        until the client acks, exactly as with /wait, and the backlog is replayed
+        on every (re)connect so a dropped stream never loses a message.
+        """
+        token = request.match_info["token"]
+        store.touch(token)
+        keepalive = env_float("SSE_KEEPALIVE_SECONDS", 15) or 15
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+        subscriber = Subscriber(int(os.getenv("SSE_QUEUE_MAX", "256")))
+        subscribers.setdefault(token, set()).add(subscriber)
+        try:
+            await response.write(b"retry: 3000\n\n")
+            for page in store.pending(token):
+                await response.write(sse_frame(page_data(page)))
+            while not subscriber.overflowed.is_set():
+                try:
+                    data = await asyncio.wait_for(subscriber.queue.get(), keepalive)
+                except asyncio.TimeoutError:
+                    await response.write(b": keepalive\n\n")
+                    continue
+                await response.write(sse_frame(data))
+        except (asyncio.CancelledError, ConnectionResetError, ConnectionError):
+            pass
+        finally:
+            bucket = subscribers.get(token)
+            if bucket:
+                bucket.discard(subscriber)
+                if not bucket:
+                    subscribers.pop(token, None)
+        return response
+
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events)])
     return app
 
 

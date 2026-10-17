@@ -194,7 +194,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.3.8"
+        assert data["version"] == "0.4.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -384,6 +384,73 @@ async def test_wait_max_age_rejects_bad_value(monkeypatch):
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_events_stream_pushes_page(monkeypatch):
+    monkeypatch.setenv("SSE_KEEPALIVE_SECONDS", "30")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.get(f"/mailboxes/{token}/events")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/event-stream")
+        await client.post("/notify", json={"uuid": token, "message": "pushed"})
+        found = False
+        for _ in range(6):
+            frame = await asyncio.wait_for(resp.content.readuntil(b"\n\n"), 5)
+            if b"pushed" in frame:
+                found = True
+                break
+        assert found
+        resp.close()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_replays_backlog_on_connect(monkeypatch):
+    monkeypatch.setenv("SSE_KEEPALIVE_SECONDS", "30")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post("/notify", json={"uuid": token, "message": "backlog"})
+        resp = await client.get(f"/mailboxes/{token}/events")
+        found = False
+        for _ in range(6):
+            frame = await asyncio.wait_for(resp.content.readuntil(b"\n\n"), 5)
+            if b"backlog" in frame:
+                found = True
+                break
+        assert found
+        resp.close()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_events_sends_keepalive(monkeypatch):
+    monkeypatch.setenv("SSE_KEEPALIVE_SECONDS", "0.1")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.get(f"/mailboxes/{token}/events")
+        found = False
+        for _ in range(6):
+            frame = await asyncio.wait_for(resp.content.readuntil(b"\n\n"), 5)
+            if frame.startswith(b": keepalive"):
+                found = True
+                break
+        assert found
+        resp.close()
+    finally:
+        await client.close()
+
+
 def test_pager_plugin_syntax():
     plugin_path = Path("plugins/pager.js")
     assert plugin_path.exists()
@@ -409,6 +476,13 @@ def test_plugin_acknowledges_and_scopes_sessions():
     # bounded long-poll instead of hanging into a proxy 504
     assert "timeout_seconds" in content
     assert "response.status === 408" in content
+    # SSE push with automatic fallback to long-poll
+    assert "/events" in content
+    assert "text/event-stream" in content
+    assert "getReader" in content
+    assert "PAGER_TRANSPORT" in content
+    assert "streamSse" in content
+    assert "longPollOnce" in content
     # never deliver into another directory or a sub-agent session
     assert "parentID" in content
     assert "inDirectory" in content

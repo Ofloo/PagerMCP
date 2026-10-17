@@ -8,6 +8,11 @@ const DEFAULT_MAX_AGE_MS = Number(process.env.PAGER_MAX_AGE_MS || 0)
 // timeout (observed at 120s), otherwise every poll dies as a proxy 504 instead of
 // a clean 408 and the client logs a warning every cycle.
 const WAIT_SECONDS = Number(process.env.PAGER_WAIT_SECONDS || 55)
+// Transport for receiving: "auto" tries the SSE push stream and falls back to
+// long-polling; "sse" forces push; "longpoll" forces the old behaviour. Push is
+// a wake-up only — pages stay server-side until acked, so both transports are
+// at-least-once and a dropped stream is replayed from the backlog on reconnect.
+const TRANSPORT = String(process.env.PAGER_TRANSPORT || "auto").toLowerCase()
 
 const unwrap = (value) => value?.data ?? value
 
@@ -150,33 +155,102 @@ export const PagerPlugin = async ({ client, directory }) => {
     }
   }
 
+  const handlePage = async (token, page) => {
+    if (!page?.id) return
+    if (deliveredIds.has(page.id)) {
+      await ack(token, page.id) // duplicate redelivery: drop it, do not re-prompt
+      return
+    }
+    await deliver(token, page)
+    rememberDelivered(page.id)
+  }
+
+  const longPollOnce = async (token) => {
+    const maxAgeSeconds = Math.max(0, Math.floor(DEFAULT_MAX_AGE_MS / 1000))
+    const params = new URLSearchParams({ timeout_seconds: String(Math.max(1, Math.floor(WAIT_SECONDS))) })
+    if (maxAgeSeconds > 0) params.set("max_age_seconds", String(maxAgeSeconds))
+    const response = await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait?${params.toString()}`)
+    if (response.status === 408) return // normal idle timeout
+    if (!response.ok) throw new Error(`PagerMCP returned HTTP ${response.status}`)
+    await handlePage(token, await response.json())
+  }
+
+  // Long-lived SSE push stream. Returns when the server closes it; throws on a
+  // connection or HTTP error so the caller can fall back to long-polling.
+  const streamSse = async (token) => {
+    const response = await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/events`, {
+      headers: { Accept: "text/event-stream" },
+    })
+    if (!response.ok || !response.body) throw new Error(`PagerMCP SSE returned HTTP ${response.status}`)
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ""
+    try {
+      while (!stopped) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let boundary
+        while ((boundary = buffer.indexOf("\n\n")) >= 0) {
+          const raw = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+          const data = raw
+            .split("\n")
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trimStart())
+            .join("\n")
+          if (!data) continue // keepalive / retry / comment line
+          let page
+          try {
+            page = JSON.parse(data)
+          } catch {
+            continue
+          }
+          await handlePage(token, page)
+        }
+      }
+    } finally {
+      try {
+        await reader.cancel()
+      } catch {}
+    }
+  }
+
   const waitForPager = async () => {
     if (running) return
     running = true
+    let sseFailures = 0
+    let sseUnsupported = false
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
     try {
       while (!stopped) {
         const token = await ensureToken()
         if (!token) {
-          await new Promise((resolve) => setTimeout(resolve, 5000))
+          await sleep(5000)
           continue
         }
-        try {
-          const maxAgeSeconds = Math.max(0, Math.floor(DEFAULT_MAX_AGE_MS / 1000))
-          const params = new URLSearchParams({ timeout_seconds: String(Math.max(1, Math.floor(WAIT_SECONDS))) })
-          if (maxAgeSeconds > 0) params.set("max_age_seconds", String(maxAgeSeconds))
-          const response = await fetch(`${pagerUrl}/mailboxes/${encodeURIComponent(token)}/wait?${params.toString()}`)
-          if (response.status === 408) continue // normal idle timeout: poll again at once
-          if (!response.ok) throw new Error(`PagerMCP returned HTTP ${response.status}`)
-          const page = await response.json()
-          if (page?.id && deliveredIds.has(page.id)) {
-            await ack(token, page.id) // duplicate redelivery: drop it, do not re-prompt
-            continue
+        const trySse = !sseUnsupported && (TRANSPORT === "sse" || (TRANSPORT === "auto" && sseFailures < 5))
+        if (trySse) {
+          try {
+            await streamSse(token)
+            sseFailures = 0
+            continue // stream ended cleanly: reconnect immediately
+          } catch (error) {
+            sseFailures += 1
+            if (/\b404\b/.test(String(error))) sseUnsupported = true // server has no /events
+            await client.app.log({ body: { service: "pager-plugin", level: "warn", message: `Pager SSE unavailable, ${TRANSPORT === "sse" ? "retrying" : "falling back to long-poll"}: ${String(error)}` } }).catch(() => {})
+            if (TRANSPORT === "sse") {
+              await sleep(5000)
+              continue
+            }
           }
-          await deliver(token, page)
-          rememberDelivered(page?.id)
+        }
+        try {
+          await longPollOnce(token)
+          sseFailures = 0 // healthy long-poll: try SSE again on the next loop
         } catch (error) {
           await client.app.log({ body: { service: "pager-plugin", level: "warn", message: String(error) } }).catch(() => {})
-          await new Promise((resolve) => setTimeout(resolve, 5000))
+          await sleep(5000)
         }
       }
     } finally {

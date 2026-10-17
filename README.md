@@ -113,6 +113,10 @@ printf '%s' '<message>' | gpg --decrypt
 
 The mailbox UUID stays visible to the relay (it is the routing address), so treat the UUID as the addressing secret and GPG as the content secret.
 
+## Push (Server-Sent Events)
+
+Besides long-polling `GET /wait`, the server offers a push stream: `GET /mailboxes/{uuid}/events` (SSE). The plugin uses it automatically (`PAGER_TRANSPORT=auto`): it keeps one idle stream open instead of re-issuing a long-poll every `PAGER_WAIT_SECONDS`, which uses noticeably less power on battery-limited clients, and it survives proxy idle timeouts via periodic `: keepalive` comments. If SSE is unavailable or drops, the plugin falls back to long-polling by itself. Force one transport with `PAGER_TRANSPORT=sse` or `PAGER_TRANSPORT=longpoll`. Push is only the wake-up: messages still leave the queue on `POST /ack` and the backlog is replayed on reconnect, so nothing is lost either way.
+
 ## Privacy
 
 PagerMCP logs nothing, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.
