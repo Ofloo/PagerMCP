@@ -124,6 +124,10 @@ For a client that must be woken while it is **not connected** (a backgrounded or
 curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' \
   -d '{"channel":"unifiedpush","endpoint":"https://distributor.example/UPxyz"}'
 
+# or push through your own ntfy server (the server sets NTFY_URL, optionally NTFY_TOKEN)
+curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' \
+  -d '{"channel":"ntfy","topic":"pager-mypc"}'
+
 # renew before it expires, or push silently turns off
 curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' -d '{"id":"<id>"}'
 

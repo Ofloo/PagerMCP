@@ -51,7 +51,12 @@ def build_app() -> web.Application:
     )
     cleanup_interval = env_float("CLEANUP_INTERVAL_SECONDS", 3600)
     warn_seconds = env_float("SUBSCRIPTION_WARN_DAYS", 3)
+    # Channels that receive a content-less JSON trigger. `ntfy` is added when an
+    # ntfy server is configured; it publishes a plain-text wake-up to a topic.
+    ntfy_url = os.getenv("NTFY_URL", "").rstrip("/")
+    ntfy_token = os.getenv("NTFY_TOKEN", "")
     generic_channels = {"unifiedpush", "http", "webhook"}
+    push_channels = generic_channels | ({"ntfy"} if ntfy_url else set())
     push_state: dict[str, Any] = {"session": None, "reaper": None, "tasks": set()}
     waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
     subscribers: dict[str, set[Subscriber]] = {}
@@ -69,7 +74,7 @@ def build_app() -> web.Application:
         "retention": {"message_ttl_seconds": store.message_ttl, "mailbox_ttl_seconds": store.mailbox_ttl},
         "wait": {"timeout_seconds": float(os.getenv("WAIT_TIMEOUT_SECONDS", "0"))},
         "sse": {"enabled": True, "keepalive_seconds": env_float("SSE_KEEPALIVE_SECONDS", 15), "queue_max": int(os.getenv("SSE_QUEUE_MAX", "256"))},
-        "subscriptions": {"enabled": True, "channels": sorted(generic_channels), "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
+        "subscriptions": {"enabled": True, "channels": sorted(push_channels), "ntfy_url": ntfy_url or None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
         "cleanup_interval_seconds": cleanup_interval,
         "persistence": store.db is not None,
     }
@@ -190,7 +195,7 @@ def build_app() -> web.Application:
         session = push_state["session"]
         if session is not None and not session.closed:
             for subscription in store.subscriptions_for(token):
-                if subscription.channel not in generic_channels:
+                if subscription.channel not in push_channels:
                     continue
                 task = asyncio.create_task(push_trigger(session, token, subscription, data))
                 push_state["tasks"].add(task)
@@ -298,24 +303,42 @@ def build_app() -> web.Application:
                     subscribers.pop(token, None)
         return response
 
+    def ntfy_headers(title: str) -> dict[str, str]:
+        headers = {"Title": title, "Tags": "pager"}
+        if ntfy_token:
+            headers["Authorization"] = f"Bearer {ntfy_token}"
+        return headers
+
     async def push_trigger(session: ClientSession, token: str, subscription: Any, data: dict[str, Any]) -> None:
         try:
-            body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
-            async with session.post(subscription.endpoint, json=body, timeout=ClientTimeout(total=10)) as response:
-                if response.status in (404, 410):
-                    store.remove_subscription(token, subscription.id)
+            timeout = ClientTimeout(total=10)
+            if subscription.channel == "ntfy":
+                async with session.post(subscription.endpoint, data=f"New page in mailbox {token}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
+                    status = response.status
+            else:
+                body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
+                async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
+                    status = response.status
+            if status in (404, 410):
+                store.remove_subscription(token, subscription.id)
         except Exception:
             pass
 
     async def push_warning(session: ClientSession, subscription: Any) -> None:
         """Warn a subscription that its lease is about to end, so the client can renew before push turns itself off."""
         try:
-            body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
-            async with session.post(subscription.endpoint, json=body, timeout=ClientTimeout(total=10)) as response:
-                if response.status in (404, 410):
-                    store.remove_subscription(subscription.mailbox, subscription.id)
-                elif response.status < 400:
-                    store.mark_warned(subscription.id)
+            timeout = ClientTimeout(total=10)
+            if subscription.channel == "ntfy":
+                async with session.post(subscription.endpoint, data=b"PagerMCP: push expires soon", headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
+                    status = response.status
+            else:
+                body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
+                async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
+                    status = response.status
+            if status in (404, 410):
+                store.remove_subscription(subscription.mailbox, subscription.id)
+            elif status < 400:
+                store.mark_warned(subscription.id)
         except Exception:
             pass
 
@@ -336,11 +359,19 @@ def build_app() -> web.Application:
             return web.json_response({"id": subscription.id, "channel": subscription.channel, "expires": subscription.expires})
         channel = body.get("channel")
         endpoint = body.get("endpoint")
+        keys = body.get("keys")
+        if str(channel) == "ntfy":
+            if not ntfy_url:
+                raise web.HTTPBadRequest(text="ntfy channel is not configured (set NTFY_URL)")
+            topic = body.get("topic")
+            if not topic or not re.match(r"^[A-Za-z0-9_-]{1,64}$", str(topic)):
+                raise web.HTTPBadRequest(text="a valid topic is required for the ntfy channel")
+            endpoint = f"{ntfy_url}/{topic}"
+            keys = {"topic": str(topic)}
         if not channel or not endpoint:
             raise web.HTTPBadRequest(text="channel and endpoint are required")
         if not re.match(r"^https?://", str(endpoint)):
             raise web.HTTPBadRequest(text="endpoint must be an http(s) URL")
-        keys = body.get("keys")
         subscription = store.add_subscription(token, str(channel), str(endpoint), keys if isinstance(keys, dict) else None)
         if subscription is None:
             raise web.HTTPTooManyRequests(text="too many subscriptions for this mailbox")
@@ -380,7 +411,7 @@ def build_app() -> web.Application:
             return
         session = push_state["session"]
         for subscription in store.subscriptions_nearing_expiry(time.time(), warn_seconds):
-            if session is not None and not session.closed and subscription.channel in generic_channels:
+            if session is not None and not session.closed and subscription.channel in push_channels:
                 task = asyncio.create_task(push_warning(session, subscription))
                 push_state["tasks"].add(task)
                 task.add_done_callback(push_state["tasks"].discard)

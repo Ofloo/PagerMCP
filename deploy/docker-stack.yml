@@ -25,7 +25,7 @@ version: "3.9"
 services:
   pagermcp:
     # Bump this on every release. Keep it a concrete version tag (or digest).
-    image: ofloo/pagermcp:v0.6.0
+    image: ofloo/pagermcp:v0.7.0
     environment:
       MODE: "server"
       PORT: "8080"
@@ -43,6 +43,9 @@ services:
       SUBSCRIPTION_TTL_DAYS: "30"
       # Warn the endpoint this long before a lease ends so the client can renew.
       SUBSCRIPTION_WARN_DAYS: "3"
+      # Optional: enable the `ntfy` push channel against your own ntfy server.
+      # NTFY_URL: "https://ntfy.ofloo.io"
+      # NTFY_TOKEN: "<bearer token, if the topic is protected>"
       # Periodically expire mailboxes, messages and subscriptions even when the
       # server is idle, so a forgotten account's data is not kept forever.
       CLEANUP_INTERVAL_SECONDS: "3600"

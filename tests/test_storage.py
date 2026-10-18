@@ -196,7 +196,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.6.0"
+        assert data["version"] == "0.7.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -637,6 +637,57 @@ async def test_mailbox_status_reports_push_state(monkeypatch):
         assert status["push"]["subscriptions"] == 1
         assert status["push"]["channels"] == ["unifiedpush"]
         assert status["push"]["next_expiry"] > time.time()
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ntfy_channel_publishes_content_free_wakeup(monkeypatch):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    received = []
+
+    async def hook(request):
+        received.append({"topic": request.match_info["topic"], "title": request.headers.get("Title"), "body": await request.text()})
+        return web.json_response({"ok": True})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/{topic}", hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    base = f"http://127.0.0.1:{receiver.server.port}"
+    monkeypatch.setenv("NTFY_URL", base)
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "ntfy", "topic": "pager-test"})
+        assert created.status == 201
+        settings = await (await client.get("/settings")).json()
+        assert "ntfy" in settings["subscriptions"]["channels"]
+        assert settings["subscriptions"]["ntfy_url"] == base
+        await client.post("/notify", json={"uuid": token, "message": "secret-content"})
+        await asyncio.sleep(0.4)
+        assert received and received[0]["topic"] == "pager-test"
+        assert received[0]["title"] == "PagerMCP"
+        assert token in received[0]["body"]
+        # data-only: the wake-up never carries the message content
+        assert "secret-content" not in received[0]["body"]
+    finally:
+        await client.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_ntfy_channel_requires_config(monkeypatch):
+    monkeypatch.delenv("NTFY_URL", raising=False)
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "ntfy", "topic": "x"})
+        assert resp.status == 400
     finally:
         await client.close()
 
