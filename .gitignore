@@ -4,3 +4,10 @@ __pycache__/
 *.pyc
 .venv/
 .build_number
+
+# Secrets: never commit these
+google-services.json
+*service-account*.json
+*serviceaccount*.json
+fcm*.json
+*.pem
