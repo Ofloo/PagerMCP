@@ -617,6 +617,30 @@ async def test_settings_endpoint_exposes_client_relevant_config(monkeypatch):
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_mailbox_status_reports_push_state(monkeypatch):
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        status = await (await client.get(f"/mailboxes/{token}/status")).json()
+        assert status["mailbox"] == token
+        assert status["messages"] == 0
+        assert status["push"]["enabled"] is False
+        assert status["push"]["next_expiry"] is None
+        await client.post("/notify", json={"uuid": token, "message": "hi"})
+        await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": "https://e.test/hook"})
+        status = await (await client.get(f"/mailboxes/{token}/status")).json()
+        assert status["messages"] == 1
+        assert status["push"]["enabled"] is True
+        assert status["push"]["subscriptions"] == 1
+        assert status["push"]["channels"] == ["unifiedpush"]
+        assert status["push"]["next_expiry"] > time.time()
+    finally:
+        await client.close()
+
+
 def test_pager_plugin_syntax():
     plugin_path = Path("plugins/pager.js")
     assert plugin_path.exists()

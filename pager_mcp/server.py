@@ -359,6 +359,22 @@ def build_app() -> web.Application:
         token = request.match_info["token"]
         return web.json_response({"removed": store.remove_subscriptions(token, request.query.get("channel"))})
 
+    async def mailbox_status(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        subscriptions = store.subscriptions_for(token)
+        return web.json_response({
+            "mailbox": token,
+            "messages": len(store.pending(token)),
+            "push": {
+                "enabled": bool(subscriptions),
+                "subscriptions": len(subscriptions),
+                "channels": sorted({sub.channel for sub in subscriptions}),
+                "next_expiry": min((sub.expires for sub in subscriptions), default=None),
+            },
+            "retention": {"message_ttl_seconds": store.message_ttl, "mailbox_ttl_seconds": store.mailbox_ttl},
+        })
+
     async def warn_expiring() -> None:
         if warn_seconds <= 0:
             return
@@ -389,7 +405,7 @@ def build_app() -> web.Application:
             await push_state["session"].close()
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
