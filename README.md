@@ -140,7 +140,27 @@ curl -X DELETE "$B/mailboxes/$UUID/subscriptions/<id>"
 curl -X DELETE "$B/mailboxes/$UUID/subscriptions"
 ```
 
-On `notify` the server sends a **data-only trigger** (no message content) to each endpoint; the device wakes and fetches the page over SSE/`/wait`. Subscriptions use a lease (`SUBSCRIPTION_TTL_DAYS`, default 30): a client that never renews turns its own push off, so a forgotten mailbox does not keep a permanent push hook. Shortly before a lease ends (`SUBSCRIPTION_WARN_DAYS`, default 3) the server sends a `warning` trigger so the client can renew in time. The first supported channel is a generic HTTP endpoint (e.g. a UnifiedPush distributor URL); Web Push/VAPID and FCM are additive later.
+On `notify` the server sends a **data-only trigger** (no message content) to each endpoint; the device wakes and fetches the page over SSE/`/wait`. Subscriptions use a lease (`SUBSCRIPTION_TTL_DAYS`, default 30): a client that never renews turns its own push off, so a forgotten mailbox does not keep a permanent push hook. Shortly before a lease ends (`SUBSCRIPTION_WARN_DAYS`, default 3) the server sends a `warning` trigger so the client can renew in time. The channels are a generic HTTP endpoint (e.g. a UnifiedPush distributor URL), `ntfy` (set `NTFY_URL`), and `fcm` (set `FCM_CREDENTIALS`, see below); Web Push/VAPID is additive later. The endpoint/token is **write-only**: it is never returned by the API, and you rotate it by `POST`ing a new value with the `id`.
+
+### Enabling FCM
+
+FCM uses two different files — do not mix them up:
+
+- **App side:** `google-services.json` from the Firebase console. It belongs **in the Android app** (e.g. `app/google-services.json`), not on the server. It carries the project id and a public client API key.
+- **Server side:** the **service-account private key** JSON (contains `"client_email"` and `"private_key"`) from Firebase Console → Project settings → **Service accounts → Generate new private key**. This is the secret the server uses to mint FCM access tokens.
+
+Enable it:
+
+1. In Google Cloud Console, enable the **Firebase Cloud Messaging API** for the project.
+2. Put the service-account JSON where the server can read it and set the environment:
+   - `FCM_CREDENTIALS` — path to that JSON (or its contents inline),
+   - `FCM_PROJECT_ID` — the Firebase project id (omit if the JSON carries it),
+   - `FCM_INCLUDE_PAYLOAD` — leave unset for a data-only wake-up; set to `1` to put the message text in the notification.
+3. Redeploy; `GET /settings` then lists `"fcm"` in `channels` and `"fcm_enabled": true`.
+4. The app fetches its FCM registration token and registers it for its mailbox: `POST /mailboxes/{uuid}/subscriptions {"channel":"fcm","token":"<token>"}` (rotate later with `{"id":"<id>","channel":"fcm","token":"<new>"}`).
+
+The credentials file is read **once at startup**, so it must be present on every (re)start; rotate by replacing it and restarting. Never commit it — pass it as a Docker secret.
+
 
 ## Server settings
 
