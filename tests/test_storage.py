@@ -509,6 +509,8 @@ async def test_notify_sends_data_only_trigger_to_subscription(monkeypatch):
         subscription = await created.json()
         listed = await (await client.get(f"/mailboxes/{token}/subscriptions")).json()
         assert [s["id"] for s in listed["subscriptions"]] == [subscription["id"]]
+        # the endpoint/token is a secret and is never listed
+        assert "endpoint" not in listed["subscriptions"][0]
         await client.post("/notify", json={"uuid": token, "message": "boom", "secret": "classified"})
         await asyncio.sleep(0.4)
         assert received and received[0]["type"] == "page" and received[0]["mailbox"] == token
@@ -667,6 +669,8 @@ async def test_ntfy_channel_publishes_content_free_wakeup(monkeypatch):
         settings = await (await client.get("/settings")).json()
         assert "ntfy" in settings["subscriptions"]["channels"]
         assert settings["subscriptions"]["ntfy_url"] == base
+        listed = await (await client.get(f"/mailboxes/{token}/subscriptions")).json()
+        assert "pager-test" not in json.dumps(listed)
         await client.post("/notify", json={"uuid": token, "message": "secret-content"})
         await asyncio.sleep(0.4)
         assert received and received[0]["topic"] == "pager-test"
@@ -737,6 +741,8 @@ async def test_fcm_channel_sends_data_only(monkeypatch, tmp_path):
         settings = await (await client.get("/settings")).json()
         assert "fcm" in settings["subscriptions"]["channels"]
         assert settings["subscriptions"]["fcm_enabled"] is True
+        listed = await (await client.get(f"/mailboxes/{token}/subscriptions")).json()
+        assert "device-token-1234567890" not in json.dumps(listed)
         await client.post("/notify", json={"uuid": token, "message": "secret-content"})
         await asyncio.sleep(0.5)
         assert token_calls and token_calls[0]["grant_type"] == "urn:ietf:params:oauth:grant-type:jwt-bearer"
@@ -781,6 +787,56 @@ async def test_fcm_invalid_token_removes_subscription(monkeypatch, tmp_path):
         await asyncio.sleep(0.5)
         listed = await (await client.get(f"/mailboxes/{token}/subscriptions")).json()
         assert listed["subscriptions"] == []
+    finally:
+        await client.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_fcm_token_can_be_overwritten_but_not_read(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    sent = []
+
+    async def token_hook(request):
+        return web.json_response({"access_token": "test-access", "expires_in": 3600})
+
+    async def send_hook(request):
+        sent.append(await request.json())
+        return web.json_response({"name": "ok"})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/token", token_hook), web.post("/v1/projects/{tail:.*}", send_hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    base = f"http://127.0.0.1:{receiver.server.port}"
+    monkeypatch.setenv("FCM_CREDENTIALS", str(_fcm_service_account(tmp_path)))
+    monkeypatch.setenv("FCM_PROJECT_ID", "testproj")
+    monkeypatch.setenv("FCM_BASE_URL", base)
+    monkeypatch.setenv("FCM_TOKEN_URL", f"{base}/token")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        mailbox = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{mailbox}/subscriptions", json={"channel": "fcm", "token": "device-token-OLD-000000"})
+        subscription = await created.json()
+        # overwrite the token via the id (write-only), never reading it back
+        rotated = await client.post(f"/mailboxes/{mailbox}/subscriptions", json={"id": subscription["id"], "channel": "fcm", "token": "device-token-NEW-999999"})
+        assert rotated.status == 200
+        await client.post("/notify", json={"uuid": mailbox, "message": "x"})
+        await asyncio.sleep(0.5)
+        assert sent and sent[-1]["message"]["token"] == "device-token-NEW-999999"
+        # an empty value only renews; it must not clobber the stored token
+        renewed = await client.post(f"/mailboxes/{mailbox}/subscriptions", json={"id": subscription["id"], "channel": "fcm", "token": ""})
+        assert renewed.status == 200
+        sent.clear()
+        await client.post("/notify", json={"uuid": mailbox, "message": "y"})
+        await asyncio.sleep(0.5)
+        assert sent and sent[-1]["message"]["token"] == "device-token-NEW-999999"
+        listed = await (await client.get(f"/mailboxes/{mailbox}/subscriptions")).json()
+        blob = json.dumps(listed)
+        assert subscription["id"] in blob
+        assert "device-token-OLD-000000" not in blob and "device-token-NEW-999999" not in blob
     finally:
         await client.close()
         await receiver.close()

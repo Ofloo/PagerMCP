@@ -417,6 +417,29 @@ def build_app() -> web.Application:
         except Exception:
             pass
 
+    def resolve_target(channel: str, body: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+        if channel == "ntfy":
+            if not ntfy_url:
+                raise web.HTTPBadRequest(text="ntfy channel is not configured (set NTFY_URL)")
+            topic = body.get("topic")
+            if not topic or not re.match(r"^[A-Za-z0-9_-]{1,64}$", str(topic)):
+                raise web.HTTPBadRequest(text="a valid topic is required for the ntfy channel")
+            return f"{ntfy_url}/{topic}", {"topic": str(topic)}
+        if channel == "fcm":
+            if not fcm_account:
+                raise web.HTTPBadRequest(text="fcm channel is not configured (set FCM_CREDENTIALS)")
+            device = body.get("token")
+            if not device or not re.match(r"^[A-Za-z0-9_:\-]{10,4096}$", str(device)):
+                raise web.HTTPBadRequest(text="a device token is required for the fcm channel")
+            return str(device), None
+        endpoint = body.get("endpoint")
+        if not endpoint:
+            raise web.HTTPBadRequest(text="endpoint is required")
+        if not re.match(r"^https?://", str(endpoint)):
+            raise web.HTTPBadRequest(text="endpoint must be an http(s) URL")
+        keys = body.get("keys")
+        return str(endpoint), (keys if isinstance(keys, dict) else None)
+
     async def add_subscription(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
@@ -427,35 +450,26 @@ def build_app() -> web.Application:
         if not isinstance(body, dict):
             raise web.HTTPBadRequest(text="JSON object required")
         existing = body.get("id")
+        channel = str(body.get("channel") or "")
+        value = body.get("token") if channel == "fcm" else body.get("topic") if channel == "ntfy" else body.get("endpoint")
+
         if existing:
-            subscription = store.renew_subscription(token, str(existing))
+            # Renew; overwrite the stored endpoint/token only when a non-empty new value is
+            # given (an empty value means "leave it as it is"). The value is write-only: it is
+            # never echoed back. The id comes from the create reply.
+            if not value:
+                subscription = store.renew_subscription(token, str(existing))
+            else:
+                endpoint, keys = resolve_target(channel, body)
+                subscription = store.update_subscription(token, str(existing), endpoint, keys)
             if subscription is None:
                 raise web.HTTPNotFound(text="subscription not found")
             return web.json_response({"id": subscription.id, "channel": subscription.channel, "expires": subscription.expires})
-        channel = body.get("channel")
-        endpoint = body.get("endpoint")
-        keys = body.get("keys")
-        if str(channel) == "ntfy":
-            if not ntfy_url:
-                raise web.HTTPBadRequest(text="ntfy channel is not configured (set NTFY_URL)")
-            topic = body.get("topic")
-            if not topic or not re.match(r"^[A-Za-z0-9_-]{1,64}$", str(topic)):
-                raise web.HTTPBadRequest(text="a valid topic is required for the ntfy channel")
-            endpoint = f"{ntfy_url}/{topic}"
-            keys = {"topic": str(topic)}
-        elif str(channel) == "fcm":
-            if not fcm_account:
-                raise web.HTTPBadRequest(text="fcm channel is not configured (set FCM_CREDENTIALS)")
-            device = body.get("token")
-            if not device or not re.match(r"^[A-Za-z0-9_:\-]{10,4096}$", str(device)):
-                raise web.HTTPBadRequest(text="a device token is required for the fcm channel")
-            endpoint = str(device)
-            keys = None
-        if not channel or not endpoint:
-            raise web.HTTPBadRequest(text="channel and endpoint are required")
-        if str(channel) != "fcm" and not re.match(r"^https?://", str(endpoint)):
-            raise web.HTTPBadRequest(text="endpoint must be an http(s) URL")
-        subscription = store.add_subscription(token, str(channel), str(endpoint), keys if isinstance(keys, dict) else None)
+
+        if not channel:
+            raise web.HTTPBadRequest(text="channel is required")
+        endpoint, keys = resolve_target(channel, body)
+        subscription = store.add_subscription(token, channel, endpoint, keys)
         if subscription is None:
             raise web.HTTPTooManyRequests(text="too many subscriptions for this mailbox")
         return web.json_response({"id": subscription.id, "channel": subscription.channel, "expires": subscription.expires}, status=201)
@@ -463,7 +477,10 @@ def build_app() -> web.Application:
     async def list_subscriptions(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
-        return web.json_response({"subscriptions": [{"id": s.id, "channel": s.channel, "endpoint": s.endpoint, "expires": s.expires} for s in store.subscriptions_for(token)]})
+        # Never return the endpoint/token: for `ntfy` it holds the (secret) topic
+        # and for `fcm` it is the device token. The id is all a client needs to
+        # renew or delete.
+        return web.json_response({"subscriptions": [{"id": s.id, "channel": s.channel, "expires": s.expires} for s in store.subscriptions_for(token)]})
 
     async def remove_subscription(request: web.Request) -> web.Response:
         token = request.match_info["token"]

@@ -182,6 +182,30 @@ class MailboxStore:
                     return renewed
             return None
 
+    def update_subscription(self, token: str, sub_id: str, endpoint: str, keys: dict[str, Any] | None) -> Subscription | None:
+        """Overwrite an existing subscription's endpoint/token (write-only) and extend its lease.
+
+        Used to rotate a device token or change an endpoint without ever reading the
+        old value back. Returns None if not found.
+        """
+        with self.lock:
+            now = time.time()
+            expires = self._expiry(now)
+            keys_json = json.dumps(keys) if keys is not None else None
+            if self.db:
+                row = self.db.execute("SELECT id,token,channel,created FROM push_subscriptions WHERE id=? AND token=?", (sub_id, token)).fetchone()
+                if not row:
+                    return None
+                self.db.execute("UPDATE push_subscriptions SET endpoint=?, keys=?, renewed=?, expires=?, warned=0 WHERE id=?", (endpoint, keys_json, now, expires, sub_id))
+                self.db.commit()
+                return Subscription(row[0], row[1], row[2], endpoint, keys, row[3], now, expires, 0.0)
+            for index, sub in enumerate(self.subscriptions.get(token, [])):
+                if sub.id == sub_id:
+                    updated = Subscription(sub.id, sub.mailbox, sub.channel, endpoint, keys, sub.created, now, expires, 0.0)
+                    self.subscriptions[token][index] = updated
+                    return updated
+            return None
+
     def subscriptions_for(self, token: str, now: float | None = None) -> list[Subscription]:
         """Active (non-expired) subscriptions for a mailbox."""
         moment = time.time() if now is None else now
