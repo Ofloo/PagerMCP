@@ -50,6 +50,7 @@ def build_app() -> web.Application:
         int(os.getenv("MAX_SUBSCRIPTIONS_PER_MAILBOX", "16")),
     )
     cleanup_interval = env_float("CLEANUP_INTERVAL_SECONDS", 3600)
+    warn_seconds = env_float("SUBSCRIPTION_WARN_DAYS", 3)
     generic_channels = {"unifiedpush", "http", "webhook"}
     push_state: dict[str, Any] = {"session": None, "reaper": None, "tasks": set()}
     waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
@@ -287,6 +288,18 @@ def build_app() -> web.Application:
         except Exception:
             pass
 
+    async def push_warning(session: ClientSession, subscription: Any) -> None:
+        """Warn a subscription that its lease is about to end, so the client can renew before push turns itself off."""
+        try:
+            body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
+            async with session.post(subscription.endpoint, json=body, timeout=ClientTimeout(total=10)) as response:
+                if response.status in (404, 410):
+                    store.remove_subscription(subscription.mailbox, subscription.id)
+                elif response.status < 400:
+                    store.mark_warned(subscription.id)
+        except Exception:
+            pass
+
     async def add_subscription(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
@@ -327,9 +340,20 @@ def build_app() -> web.Application:
         token = request.match_info["token"]
         return web.json_response({"removed": store.remove_subscriptions(token, request.query.get("channel"))})
 
+    async def warn_expiring() -> None:
+        if warn_seconds <= 0:
+            return
+        session = push_state["session"]
+        for subscription in store.subscriptions_nearing_expiry(time.time(), warn_seconds):
+            if session is not None and not session.closed and subscription.channel in generic_channels:
+                task = asyncio.create_task(push_warning(session, subscription))
+                push_state["tasks"].add(task)
+                task.add_done_callback(push_state["tasks"].discard)
+
     async def reaper() -> None:
         while True:
             await asyncio.sleep(cleanup_interval or 3600)
+            await warn_expiring()
             store.purge()
 
     async def on_startup(_: web.Application) -> None:

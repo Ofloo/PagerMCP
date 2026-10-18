@@ -28,6 +28,7 @@ class Subscription:
     created: float
     renewed: float
     expires: float
+    warned: float = 0.0
 
 
 class MailboxStore:
@@ -47,7 +48,11 @@ class MailboxStore:
             self.db = sqlite3.connect(path / "pager.sqlite3", check_same_thread=False)
             self.db.execute("CREATE TABLE IF NOT EXISTS mailboxes (token TEXT PRIMARY KEY, last_seen REAL NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS pages (id TEXT PRIMARY KEY, token TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL)")
-            self.db.execute("CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY, token TEXT NOT NULL, channel TEXT NOT NULL, endpoint TEXT NOT NULL, keys TEXT, created REAL NOT NULL, renewed REAL NOT NULL, expires REAL NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY, token TEXT NOT NULL, channel TEXT NOT NULL, endpoint TEXT NOT NULL, keys TEXT, created REAL NOT NULL, renewed REAL NOT NULL, expires REAL NOT NULL, warned REAL NOT NULL DEFAULT 0)")
+            try:
+                self.db.execute("ALTER TABLE push_subscriptions ADD COLUMN warned REAL NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
             self.db.commit()
 
     def _expiry(self, now: float) -> float:
@@ -150,16 +155,16 @@ class MailboxStore:
             expires = self._expiry(now)
             if len(self.subscriptions_for(token, now)) >= self.max_subscriptions:
                 return None
-            sub = Subscription(str(uuid.uuid4()), token, channel, endpoint, keys, now, now, expires)
+            sub = Subscription(str(uuid.uuid4()), token, channel, endpoint, keys, now, now, expires, 0.0)
             if self.db:
-                self.db.execute("INSERT INTO push_subscriptions VALUES(?,?,?,?,?,?,?,?)", (sub.id, token, channel, endpoint, json.dumps(keys) if keys is not None else None, now, now, expires))
+                self.db.execute("INSERT INTO push_subscriptions VALUES(?,?,?,?,?,?,?,?,?)", (sub.id, token, channel, endpoint, json.dumps(keys) if keys is not None else None, now, now, expires, 0.0))
                 self.db.commit()
             else:
                 self.subscriptions.setdefault(token, []).append(sub)
             return sub
 
     def renew_subscription(self, token: str, sub_id: str) -> Subscription | None:
-        """Extend the lease of an existing subscription. Returns None if not found."""
+        """Extend the lease of an existing subscription and clear its warning. Returns None if not found."""
         with self.lock:
             now = time.time()
             expires = self._expiry(now)
@@ -167,12 +172,12 @@ class MailboxStore:
                 row = self.db.execute("SELECT id,token,channel,endpoint,keys,created FROM push_subscriptions WHERE id=? AND token=?", (sub_id, token)).fetchone()
                 if not row:
                     return None
-                self.db.execute("UPDATE push_subscriptions SET renewed=?, expires=? WHERE id=?", (now, expires, sub_id))
+                self.db.execute("UPDATE push_subscriptions SET renewed=?, expires=?, warned=0 WHERE id=?", (now, expires, sub_id))
                 self.db.commit()
-                return Subscription(row[0], row[1], row[2], row[3], json.loads(row[4]) if row[4] else None, row[5], now, expires)
+                return Subscription(row[0], row[1], row[2], row[3], json.loads(row[4]) if row[4] else None, row[5], now, expires, 0.0)
             for index, sub in enumerate(self.subscriptions.get(token, [])):
                 if sub.id == sub_id:
-                    renewed = Subscription(sub.id, sub.mailbox, sub.channel, sub.endpoint, sub.keys, sub.created, now, expires)
+                    renewed = Subscription(sub.id, sub.mailbox, sub.channel, sub.endpoint, sub.keys, sub.created, now, expires, 0.0)
                     self.subscriptions[token][index] = renewed
                     return renewed
             return None
@@ -183,9 +188,33 @@ class MailboxStore:
         with self.lock:
             self._purge(time.time())
             if self.db:
-                rows = self.db.execute("SELECT id,token,channel,endpoint,keys,created,renewed,expires FROM push_subscriptions WHERE token=? AND expires > ? ORDER BY created,id", (token, moment)).fetchall()
-                return [Subscription(row[0], row[1], row[2], row[3], json.loads(row[4]) if row[4] else None, row[5], row[6], row[7]) for row in rows]
+                rows = self.db.execute("SELECT id,token,channel,endpoint,keys,created,renewed,expires,warned FROM push_subscriptions WHERE token=? AND expires > ? ORDER BY created,id", (token, moment)).fetchall()
+                return [Subscription(row[0], row[1], row[2], row[3], json.loads(row[4]) if row[4] else None, row[5], row[6], row[7], row[8]) for row in rows]
             return [sub for sub in self.subscriptions.get(token, []) if sub.expires > moment]
+
+    def subscriptions_nearing_expiry(self, now: float, window: float) -> list[Subscription]:
+        """Active subscriptions whose lease ends within `window` seconds and that have not been warned yet."""
+        with self.lock:
+            if self.db:
+                rows = self.db.execute("SELECT id,token,channel,endpoint,keys,created,renewed,expires,warned FROM push_subscriptions WHERE warned=0 AND expires > ? AND expires <= ?", (now, now + window)).fetchall()
+                return [Subscription(row[0], row[1], row[2], row[3], json.loads(row[4]) if row[4] else None, row[5], row[6], row[7], row[8]) for row in rows]
+            result: list[Subscription] = []
+            for subs in self.subscriptions.values():
+                result.extend(sub for sub in subs if sub.warned == 0 and now < sub.expires <= now + window)
+            return result
+
+    def mark_warned(self, sub_id: str) -> None:
+        with self.lock:
+            now = time.time()
+            if self.db:
+                self.db.execute("UPDATE push_subscriptions SET warned=? WHERE id=?", (now, sub_id))
+                self.db.commit()
+                return
+            for token, subs in self.subscriptions.items():
+                for index, sub in enumerate(subs):
+                    if sub.id == sub_id:
+                        self.subscriptions[token][index] = Subscription(sub.id, sub.mailbox, sub.channel, sub.endpoint, sub.keys, sub.created, sub.renewed, sub.expires, now)
+                        return
 
     def remove_subscription(self, token: str, sub_id: str) -> bool:
         with self.lock:

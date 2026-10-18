@@ -33,6 +33,8 @@ iets voor jouw toestel is, maar **niet wat**. Je haalt de inhoud daarna zelf op
 via SSE of `/wait`.
 
 Subscriptions hebben een **lease** (standaard 30 dagen): je moet ze verlengen,
-anders schakelt push automatisch uit. Daarmee bewaren we geen permanente
-push-hook (of data) van een mailbox die je vergeten bent. Mailboxes, berichten
-en subscriptions verlopen sowieso en worden opgeruimd.
+anders schakelt push automatisch uit. Vlak vóór het verlopen (standaard 3 dagen)
+stuurt de server één `warning`-trigger, zodat je op tijd kunt verlengen. Zo
+bewaren we geen permanente push-hook (of data) van een mailbox die je vergeten
+bent. Mailboxes, berichten en subscriptions verlopen sowieso en worden
+opgeruimd.

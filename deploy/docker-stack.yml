@@ -41,6 +41,8 @@ services:
       # Push subscriptions carry a lease: a client must renew within this window
       # or push turns itself off, so a forgotten mailbox keeps no permanent hook.
       SUBSCRIPTION_TTL_DAYS: "30"
+      # Warn the endpoint this long before a lease ends so the client can renew.
+      SUBSCRIPTION_WARN_DAYS: "3"
       # Periodically expire mailboxes, messages and subscriptions even when the
       # server is idle, so a forgotten account's data is not kept forever.
       CLEANUP_INTERVAL_SECONDS: "3600"

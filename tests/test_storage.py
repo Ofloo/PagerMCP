@@ -540,6 +540,50 @@ async def test_subscription_validation(monkeypatch):
         await client.close()
 
 
+def test_subscription_warning_before_expiry():
+    store = MailboxStore(None, 30 * 86400, 7 * 86400, 128, subscription_ttl=2 * 86400, max_subscriptions=16)
+    token = "00000000-0000-0000-0000-00000000000b"
+    sub = store.add_subscription(token, "unifiedpush", "https://e.test/hook", None)
+    # lease (2d) is inside the 3-day warning window
+    assert [s.id for s in store.subscriptions_nearing_expiry(time.time(), 3 * 86400)] == [sub.id]
+    store.mark_warned(sub.id)
+    assert store.subscriptions_nearing_expiry(time.time(), 3 * 86400) == []
+    store.renew_subscription(token, sub.id)
+    assert [s.id for s in store.subscriptions_nearing_expiry(time.time(), 3 * 86400)] == [sub.id]
+
+
+@pytest.mark.asyncio
+async def test_subscription_expiry_warning_reaches_endpoint(monkeypatch):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "1")
+    monkeypatch.setenv("SUBSCRIPTION_TTL_DAYS", "0.01")
+    monkeypatch.setenv("SUBSCRIPTION_WARN_DAYS", "1")
+    received = []
+
+    async def hook(request):
+        received.append(await request.json())
+        return web.json_response({"ok": True})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/hook", hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        endpoint = f"http://127.0.0.1:{receiver.server.port}/hook"
+        await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+        for _ in range(30):
+            await asyncio.sleep(0.2)
+            if any(item.get("type") == "warning" for item in received):
+                break
+        assert any(item.get("type") == "warning" and item.get("reason") == "subscription-expiring" for item in received)
+    finally:
+        await client.close()
+        await receiver.close()
+
+
 def test_pager_plugin_syntax():
     plugin_path = Path("plugins/pager.js")
     assert plugin_path.exists()
