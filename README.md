@@ -134,6 +134,10 @@ curl -X DELETE "$B/mailboxes/$UUID/subscriptions"
 
 On `notify` the server sends a **data-only trigger** (no message content) to each endpoint; the device wakes and fetches the page over SSE/`/wait`. Subscriptions use a lease (`SUBSCRIPTION_TTL_DAYS`, default 30): a client that never renews turns its own push off, so a forgotten mailbox does not keep a permanent push hook. Shortly before a lease ends (`SUBSCRIPTION_WARN_DAYS`, default 3) the server sends a `warning` trigger so the client can renew in time. The first supported channel is a generic HTTP endpoint (e.g. a UnifiedPush distributor URL); Web Push/VAPID and FCM are additive later.
 
+## Server settings
+
+`GET /settings` returns the server's effective, non-secret settings — message/mailbox limits, retention windows, the default wait timeout, SSE keepalive, push-subscription lease and warning windows, supported channels, cleanup interval, and whether storage is persistent — so a client can align itself without guessing. It exposes no addresses or secrets.
+
 ## Privacy
 
 PagerMCP logs nothing, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.

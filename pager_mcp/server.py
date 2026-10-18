@@ -58,11 +58,30 @@ def build_app() -> web.Application:
     static_cache = {"Cache-Control": "max-age=3600"}
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+    # Effective, non-secret server settings a client can read to align itself:
+    # how long it may wait, how big messages may be, the retention windows, the
+    # push-subscription lease it must renew within, etc.
+    settings = {
+        "version": __version__,
+        "build": __build__,
+        "hostname": os.getenv("HOSTNAME", ""),
+        "limits": {"max_message_bytes": max_bytes, "max_messages_per_mailbox": store.max_messages},
+        "retention": {"message_ttl_seconds": store.message_ttl, "mailbox_ttl_seconds": store.mailbox_ttl},
+        "wait": {"timeout_seconds": float(os.getenv("WAIT_TIMEOUT_SECONDS", "0"))},
+        "sse": {"enabled": True, "keepalive_seconds": env_float("SSE_KEEPALIVE_SECONDS", 15), "queue_max": int(os.getenv("SSE_QUEUE_MAX", "256"))},
+        "subscriptions": {"enabled": True, "channels": sorted(generic_channels), "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
+        "cleanup_interval_seconds": cleanup_interval,
+        "persistence": store.db is not None,
+    }
+
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
 
     async def version(_: web.Request) -> web.Response:
         return web.json_response({"version": __version__, "build": __build__, "hostname": os.getenv("HOSTNAME", "")})
+
+    async def settings_endpoint(_: web.Request) -> web.Response:
+        return web.json_response(settings, headers={"Cache-Control": "max-age=60"})
 
     async def root(_: web.Request) -> web.Response:
         readme_path = Path(base_dir) / "README.md"
@@ -370,7 +389,7 @@ def build_app() -> web.Application:
             await push_state["session"].close()
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app

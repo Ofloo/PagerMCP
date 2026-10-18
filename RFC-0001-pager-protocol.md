@@ -39,6 +39,8 @@ Messages left queued because no consumer was connected are delivered to the next
 
 The build number is what identifies the exact image. A semantic version alone is ambiguous: `latest` and a release tag of the same release are separate builds with different build numbers (for example `0.3.4` build `23` for the pinned `v0.3.4` tag and `0.3.4` build `24` for `latest`). Whenever a running instance is reported — bug reports, deploy verification, upgrade checks — always record **version and build number** from this endpoint, not the tag name, and re-check it after the fix or roll-out.
 
+`GET /settings` returns the server's **effective, non-secret settings** so a client can align itself without guessing: message-size and mailbox-depth limits, the message and mailbox retention windows, the default `wait` timeout, the SSE keepalive/queue settings, the push-subscription lease and warning windows and the supported channels, the cleanup interval, and whether storage is persistent. It exposes no addresses, tokens or credentials, and is cacheable for a minute.
+
 `GET /` serves the README rendered as HTML. `GET /rfc` serves this protocol document as plain text. `GET /privacy` serves the privacy statement as plain text. `GET /sample/{name}` serves public sample scripts such as `pager.sh` as `application/x-sh`. All are cacheable for one hour. The sample directory is not listable; only exact file names resolve.
 
 ## Sample wrapper

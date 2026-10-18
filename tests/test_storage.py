@@ -196,7 +196,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.5.0"
+        assert data["version"] == "0.6.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -582,6 +582,39 @@ async def test_subscription_expiry_warning_reaches_endpoint(monkeypatch):
     finally:
         await client.close()
         await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_endpoint_exposes_client_relevant_config(monkeypatch):
+    monkeypatch.setenv("MESSAGE_TTL_DAYS", "3")
+    monkeypatch.setenv("MAILBOX_TTL_DAYS", "10")
+    monkeypatch.setenv("MAX_MESSAGES_PER_MAILBOX", "50")
+    monkeypatch.setenv("SUBSCRIPTION_TTL_DAYS", "7")
+    monkeypatch.setenv("SUBSCRIPTION_WARN_DAYS", "2")
+    monkeypatch.setenv("WAIT_TIMEOUT_SECONDS", "90")
+    monkeypatch.setenv("SSE_KEEPALIVE_SECONDS", "20")
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "1800")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/settings")
+        assert resp.status == 200
+        data = await resp.json()
+        assert data["version"] == __version__ and data["build"] == __build__
+        assert data["limits"]["max_messages_per_mailbox"] == 50
+        assert data["retention"]["message_ttl_seconds"] == 3 * 86400
+        assert data["retention"]["mailbox_ttl_seconds"] == 10 * 86400
+        assert data["wait"]["timeout_seconds"] == 90
+        assert data["sse"]["keepalive_seconds"] == 20
+        assert data["subscriptions"]["lease_seconds"] == 7 * 86400
+        assert data["subscriptions"]["warn_seconds"] == 2 * 86400
+        assert "unifiedpush" in data["subscriptions"]["channels"]
+        assert data["cleanup_interval_seconds"] == 1800
+        # never leak secrets
+        assert "secret" not in str(data).lower()
+    finally:
+        await client.close()
 
 
 def test_pager_plugin_syntax():
