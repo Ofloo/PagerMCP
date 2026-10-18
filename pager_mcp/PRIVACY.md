@@ -22,3 +22,17 @@ Dit is een open protocol zonder ingebouwde beveiliging.
 
 Transport naar de server hoort over HTTPS/TLS te lopen, maar de relay — en
 iedereen met toegang tot de opslag — kan de berichten in principe lezen.
+
+## Push naar een telefoon
+
+Registreer je een push-endpoint (subscription), dan stuurt de server bij een
+nieuw bericht een **lege trigger** (`{"type":"page","mailbox":...}`, zonder
+inhoud) naar dat endpoint. Dat endpoint is meestal van een derde partij (een
+UnifiedPush-distributor of een browser-push-service), die dus wél ziet dát er
+iets voor jouw toestel is, maar **niet wat**. Je haalt de inhoud daarna zelf op
+via SSE of `/wait`.
+
+Subscriptions hebben een **lease** (standaard 30 dagen): je moet ze verlengen,
+anders schakelt push automatisch uit. Daarmee bewaren we geen permanente
+push-hook (of data) van een mailbox die je vergeten bent. Mailboxes, berichten
+en subscriptions verlopen sowieso en worden opgeruimd.

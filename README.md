@@ -117,6 +117,23 @@ The mailbox UUID stays visible to the relay (it is the routing address), so trea
 
 Besides long-polling `GET /wait`, the server offers a push stream: `GET /mailboxes/{uuid}/events` (SSE). The plugin uses it automatically (`PAGER_TRANSPORT=auto`): it keeps one idle stream open instead of re-issuing a long-poll every `PAGER_WAIT_SECONDS`, which uses noticeably less power on battery-limited clients, and it survives proxy idle timeouts via periodic `: keepalive` comments. If SSE is unavailable or drops, the plugin falls back to long-polling by itself. Force one transport with `PAGER_TRANSPORT=sse` or `PAGER_TRANSPORT=longpoll`. Push is only the wake-up: messages still leave the queue on `POST /ack` and the backlog is replayed on reconnect, so nothing is lost either way.
 
+For a client that must be woken while it is **not connected** (a backgrounded or closed app), register a push **subscription**:
+
+```bash
+# register (returns an id and an expiry 30 days out)
+curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' \
+  -d '{"channel":"unifiedpush","endpoint":"https://distributor.example/UPxyz"}'
+
+# renew before it expires, or push silently turns off
+curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' -d '{"id":"<id>"}'
+
+# turn it off
+curl -X DELETE "$B/mailboxes/$UUID/subscriptions/<id>"
+curl -X DELETE "$B/mailboxes/$UUID/subscriptions"
+```
+
+On `notify` the server sends a **data-only trigger** (no message content) to each endpoint; the device wakes and fetches the page over SSE/`/wait`. Subscriptions use a lease (`SUBSCRIPTION_TTL_DAYS`, default 30): a client that never renews turns its own push off, so a forgotten mailbox does not keep a permanent push hook. The first supported channel is a generic HTTP endpoint (e.g. a UnifiedPush distributor URL); Web Push/VAPID and FCM are additive later.
+
 ## Privacy
 
 PagerMCP logs nothing, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.

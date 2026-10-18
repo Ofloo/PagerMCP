@@ -25,7 +25,7 @@ version: "3.9"
 services:
   pagermcp:
     # Bump this on every release. Keep it a concrete version tag (or digest).
-    image: ofloo/pagermcp:v0.4.0
+    image: ofloo/pagermcp:v0.5.0
     environment:
       MODE: "server"
       PORT: "8080"
@@ -38,6 +38,12 @@ services:
       # client gets a clean 408 and re-polls instead of a proxy 504. Clients that
       # pass ?timeout_seconds= override this per request.
       WAIT_TIMEOUT_SECONDS: "90"
+      # Push subscriptions carry a lease: a client must renew within this window
+      # or push turns itself off, so a forgotten mailbox keeps no permanent hook.
+      SUBSCRIPTION_TTL_DAYS: "30"
+      # Periodically expire mailboxes, messages and subscriptions even when the
+      # server is idle, so a forgotten account's data is not kept forever.
+      CLEANUP_INTERVAL_SECONDS: "3600"
     ports:
       - "${PAGER_PORT:-8080}:8080"
     volumes:

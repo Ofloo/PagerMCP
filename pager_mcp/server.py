@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 
 try:
     import markdown
@@ -40,7 +41,17 @@ def sse_frame(data: dict[str, Any]) -> bytes:
 
 def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
-    store = MailboxStore(os.getenv("DATA_DIR") or None, env_float("MAILBOX_TTL_DAYS", 30), env_float("MESSAGE_TTL_DAYS", 7), int(os.getenv("MAX_MESSAGES_PER_MAILBOX", "128")))
+    store = MailboxStore(
+        os.getenv("DATA_DIR") or None,
+        env_float("MAILBOX_TTL_DAYS", 30),
+        env_float("MESSAGE_TTL_DAYS", 7),
+        int(os.getenv("MAX_MESSAGES_PER_MAILBOX", "128")),
+        env_float("SUBSCRIPTION_TTL_DAYS", 30),
+        int(os.getenv("MAX_SUBSCRIPTIONS_PER_MAILBOX", "16")),
+    )
+    cleanup_interval = env_float("CLEANUP_INTERVAL_SECONDS", 3600)
+    generic_channels = {"unifiedpush", "http", "webhook"}
+    push_state: dict[str, Any] = {"session": None, "reaper": None, "tasks": set()}
     waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
     subscribers: dict[str, set[Subscriber]] = {}
     static_cache = {"Cache-Control": "max-age=3600"}
@@ -152,6 +163,18 @@ def build_app() -> web.Application:
                 subscriber.queue.put_nowait(data)
             except asyncio.QueueFull:
                 subscriber.overflowed.set()
+        # Fire a data-only trigger to registered push subscriptions. It carries no
+        # message content: it only wakes the device, which then fetches the page
+        # over SSE or /wait. Best-effort, so a slow or dead endpoint never blocks
+        # or loses the page (it stays queued until acked).
+        session = push_state["session"]
+        if session is not None and not session.closed:
+            for subscription in store.subscriptions_for(token):
+                if subscription.channel not in generic_channels:
+                    continue
+                task = asyncio.create_task(push_trigger(session, token, subscription, data))
+                push_state["tasks"].add(task)
+                task.add_done_callback(push_state["tasks"].discard)
         return web.json_response({"accepted": True, "id": page.id}, status=202)
 
     async def pending(request: web.Request) -> web.Response:
@@ -255,8 +278,77 @@ def build_app() -> web.Application:
                     subscribers.pop(token, None)
         return response
 
+    async def push_trigger(session: ClientSession, token: str, subscription: Any, data: dict[str, Any]) -> None:
+        try:
+            body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
+            async with session.post(subscription.endpoint, json=body, timeout=ClientTimeout(total=10)) as response:
+                if response.status in (404, 410):
+                    store.remove_subscription(token, subscription.id)
+        except Exception:
+            pass
+
+    async def add_subscription(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="invalid JSON") from exc
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="JSON object required")
+        existing = body.get("id")
+        if existing:
+            subscription = store.renew_subscription(token, str(existing))
+            if subscription is None:
+                raise web.HTTPNotFound(text="subscription not found")
+            return web.json_response({"id": subscription.id, "channel": subscription.channel, "expires": subscription.expires})
+        channel = body.get("channel")
+        endpoint = body.get("endpoint")
+        if not channel or not endpoint:
+            raise web.HTTPBadRequest(text="channel and endpoint are required")
+        if not re.match(r"^https?://", str(endpoint)):
+            raise web.HTTPBadRequest(text="endpoint must be an http(s) URL")
+        keys = body.get("keys")
+        subscription = store.add_subscription(token, str(channel), str(endpoint), keys if isinstance(keys, dict) else None)
+        if subscription is None:
+            raise web.HTTPTooManyRequests(text="too many subscriptions for this mailbox")
+        return web.json_response({"id": subscription.id, "channel": subscription.channel, "expires": subscription.expires}, status=201)
+
+    async def list_subscriptions(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        return web.json_response({"subscriptions": [{"id": s.id, "channel": s.channel, "endpoint": s.endpoint, "expires": s.expires} for s in store.subscriptions_for(token)]})
+
+    async def remove_subscription(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        return web.json_response({"removed": store.remove_subscription(token, request.match_info["sub_id"])})
+
+    async def remove_subscriptions(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        return web.json_response({"removed": store.remove_subscriptions(token, request.query.get("channel"))})
+
+    async def reaper() -> None:
+        while True:
+            await asyncio.sleep(cleanup_interval or 3600)
+            store.purge()
+
+    async def on_startup(_: web.Application) -> None:
+        push_state["session"] = ClientSession()
+        if cleanup_interval:
+            push_state["reaper"] = asyncio.create_task(reaper())
+
+    async def on_cleanup(_: web.Application) -> None:
+        if push_state["reaper"] is not None:
+            push_state["reaper"].cancel()
+        for task in list(push_state["tasks"]):
+            task.cancel()
+        if push_state["session"] is not None:
+            await push_state["session"].close()
+
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions)])
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
     return app
 
 

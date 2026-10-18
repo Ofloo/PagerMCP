@@ -2,9 +2,11 @@ import asyncio
 import os
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from pager_mcp import __build__, __version__
 from pager_mcp.client import fix_session_file_ownership, get_current_session_key
@@ -194,7 +196,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.4.0"
+        assert data["version"] == "0.5.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -447,6 +449,93 @@ async def test_events_sends_keepalive(monkeypatch):
                 break
         assert found
         resp.close()
+    finally:
+        await client.close()
+
+
+def test_subscription_lease_expires_and_renews():
+    store = MailboxStore(None, 30 * 86400, 7 * 86400, 128, subscription_ttl=30 * 86400, max_subscriptions=16)
+    token = "00000000-0000-0000-0000-000000000009"
+    sub = store.add_subscription(token, "unifiedpush", "https://example.test/hook", None)
+    assert sub is not None
+    assert sub.expires > time.time()
+    assert [s.id for s in store.subscriptions_for(token)] == [sub.id]
+    # past the 30-day lease it is no longer active (push off)
+    assert store.subscriptions_for(token, now=time.time() + 31 * 86400) == []
+    renewed = store.renew_subscription(token, sub.id)
+    assert renewed is not None and renewed.renewed >= sub.renewed
+    assert store.subscriptions_for(token, now=time.time() + 1) != []
+    assert store.remove_subscription(token, sub.id) is True
+    assert store.subscriptions_for(token) == []
+
+
+def test_subscription_cap_and_sqlite(tmp_path):
+    token = "00000000-0000-0000-0000-00000000000a"
+    memory = MailboxStore(None, 30 * 86400, 7 * 86400, 128, subscription_ttl=30 * 86400, max_subscriptions=1)
+    assert memory.add_subscription(token, "unifiedpush", "https://a.test/hook", None)
+    assert memory.add_subscription(token, "unifiedpush", "https://b.test/hook", None) is None
+    disk = MailboxStore(str(tmp_path), 30 * 86400, 7 * 86400, 128, subscription_ttl=30 * 86400, max_subscriptions=16)
+    first = disk.add_subscription(token, "unifiedpush", "https://a.test/hook", {"p256dh": "x"})
+    second = disk.add_subscription(token, "webpush", "https://b.test/hook", None)
+    assert {s.id for s in disk.subscriptions_for(token)} == {first.id, second.id}
+    assert disk.remove_subscriptions(token, channel="unifiedpush") == 1
+    assert [s.id for s in disk.subscriptions_for(token)] == [second.id]
+    assert disk.remove_subscriptions(token) == 1
+    assert disk.subscriptions_for(token) == []
+
+
+@pytest.mark.asyncio
+async def test_notify_sends_data_only_trigger_to_subscription(monkeypatch):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    received = []
+
+    async def hook(request):
+        received.append(await request.json())
+        return web.json_response({"ok": True})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/hook", hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        endpoint = f"http://127.0.0.1:{receiver.server.port}/hook"
+        created = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+        assert created.status == 201
+        subscription = await created.json()
+        listed = await (await client.get(f"/mailboxes/{token}/subscriptions")).json()
+        assert [s["id"] for s in listed["subscriptions"]] == [subscription["id"]]
+        await client.post("/notify", json={"uuid": token, "message": "boom", "secret": "classified"})
+        await asyncio.sleep(0.4)
+        assert received and received[0]["type"] == "page" and received[0]["mailbox"] == token
+        # data-only: the trigger never carries message content
+        assert "message" not in received[0] and "secret" not in received[0]
+        assert (await client.delete(f"/mailboxes/{token}/subscriptions/{subscription['id']}")).status == 200
+        received.clear()
+        await client.post("/notify", json={"uuid": token, "message": "again"})
+        await asyncio.sleep(0.4)
+        assert received == []
+    finally:
+        await client.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_subscription_validation(monkeypatch):
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        bad = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": "ftp://nope"})
+        assert bad.status == 400
+        missing = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush"})
+        assert missing.status == 400
+        unknown = await client.post(f"/mailboxes/{token}/subscriptions", json={"id": "does-not-exist"})
+        assert unknown.status == 404
     finally:
         await client.close()
 
