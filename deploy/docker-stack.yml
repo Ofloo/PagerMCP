@@ -25,7 +25,7 @@ version: "3.9"
 services:
   pagermcp:
     # Bump this on every release. Keep it a concrete version tag (or digest).
-    image: ofloo/pagermcp:v0.7.0
+    image: ofloo/pagermcp:v0.8.0
     environment:
       MODE: "server"
       PORT: "8080"
@@ -46,6 +46,10 @@ services:
       # Optional: enable the `ntfy` push channel against your own ntfy server.
       # NTFY_URL: "https://ntfy.ofloo.io"
       # NTFY_TOKEN: "<bearer token, if the topic is protected>"
+      # Optional: enable the `fcm` push channel (Firebase service account JSON).
+      # FCM_CREDENTIALS: "/run/secrets/fcm.json"
+      # FCM_PROJECT_ID: "<firebase project id>"
+      # FCM_INCLUDE_PAYLOAD: "0"
       # Periodically expire mailboxes, messages and subscriptions even when the
       # server is idle, so a forgotten account's data is not kept forever.
       CLEANUP_INTERVAL_SECONDS: "3600"

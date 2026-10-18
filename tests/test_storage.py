@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import socket
 import subprocess
@@ -196,7 +197,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.7.0"
+        assert data["version"] == "0.8.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -687,6 +688,113 @@ async def test_ntfy_channel_requires_config(monkeypatch):
     try:
         token = (await (await client.post("/mailboxes")).json())["uuid"]
         resp = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "ntfy", "topic": "x"})
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
+def _fcm_service_account(tmp_path):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()).decode()
+    path = tmp_path / "fcm.json"
+    path.write_text(json.dumps({"client_email": "svc@test.iam.gserviceaccount.com", "private_key": pem, "project_id": "testproj"}))
+    return path
+
+
+@pytest.mark.asyncio
+async def test_fcm_channel_sends_data_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    sent = []
+    token_calls = []
+
+    async def token_hook(request):
+        token_calls.append(await request.post())
+        return web.json_response({"access_token": "test-access", "expires_in": 3600})
+
+    async def send_hook(request):
+        sent.append(await request.json())
+        return web.json_response({"name": "projects/testproj/messages/1"})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/token", token_hook), web.post("/v1/projects/{tail:.*}", send_hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    base = f"http://127.0.0.1:{receiver.server.port}"
+    monkeypatch.setenv("FCM_CREDENTIALS", str(_fcm_service_account(tmp_path)))
+    monkeypatch.setenv("FCM_PROJECT_ID", "testproj")
+    monkeypatch.setenv("FCM_BASE_URL", base)
+    monkeypatch.setenv("FCM_TOKEN_URL", f"{base}/token")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "fcm", "token": "device-token-1234567890"})
+        assert created.status == 201
+        settings = await (await client.get("/settings")).json()
+        assert "fcm" in settings["subscriptions"]["channels"]
+        assert settings["subscriptions"]["fcm_enabled"] is True
+        await client.post("/notify", json={"uuid": token, "message": "secret-content"})
+        await asyncio.sleep(0.5)
+        assert token_calls and token_calls[0]["grant_type"] == "urn:ietf:params:oauth:grant-type:jwt-bearer"
+        assert sent
+        message = sent[0]["message"]
+        assert message["token"] == "device-token-1234567890"
+        assert message["android"]["priority"] == "high"
+        assert message["data"]["type"] == "page" and message["data"]["mailbox"] == token
+        # data-only by default: the wake-up never carries the message content
+        assert "secret-content" not in json.dumps(sent[0])
+    finally:
+        await client.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_fcm_invalid_token_removes_subscription(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+
+    async def token_hook(request):
+        return web.json_response({"access_token": "test-access", "expires_in": 3600})
+
+    async def send_hook(request):
+        return web.json_response({"error": {"status": "INVALID_ARGUMENT"}}, status=400)
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/token", token_hook), web.post("/v1/projects/{tail:.*}", send_hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    base = f"http://127.0.0.1:{receiver.server.port}"
+    monkeypatch.setenv("FCM_CREDENTIALS", str(_fcm_service_account(tmp_path)))
+    monkeypatch.setenv("FCM_PROJECT_ID", "testproj")
+    monkeypatch.setenv("FCM_BASE_URL", base)
+    monkeypatch.setenv("FCM_TOKEN_URL", f"{base}/token")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "fcm", "token": "device-token-1234567890"})
+        await client.post("/notify", json={"uuid": token, "message": "x"})
+        await asyncio.sleep(0.5)
+        listed = await (await client.get(f"/mailboxes/{token}/subscriptions")).json()
+        assert listed["subscriptions"] == []
+    finally:
+        await client.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_fcm_channel_requires_config(monkeypatch):
+    monkeypatch.delenv("FCM_CREDENTIALS", raising=False)
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "fcm", "token": "device-token-1234567890"})
         assert resp.status == 400
     finally:
         await client.close()

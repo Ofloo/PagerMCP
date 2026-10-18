@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -39,6 +40,20 @@ def sse_frame(data: dict[str, Any]) -> bytes:
     return f"id: {data.get('id', '')}\nevent: page\ndata: {json.dumps(data)}\n\n".encode()
 
 
+def load_fcm_account(raw: str) -> dict[str, Any] | None:
+    """Read a Firebase service-account from a file path or an inline JSON string."""
+    if not raw:
+        return None
+    try:
+        text = Path(raw).read_text(encoding="utf-8") if os.path.isfile(raw) else raw
+        account = json.loads(text)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(account, dict) and account.get("client_email") and account.get("private_key"):
+        return account
+    return None
+
+
 def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
     store = MailboxStore(
@@ -55,9 +70,16 @@ def build_app() -> web.Application:
     # ntfy server is configured; it publishes a plain-text wake-up to a topic.
     ntfy_url = os.getenv("NTFY_URL", "").rstrip("/")
     ntfy_token = os.getenv("NTFY_TOKEN", "")
+    # FCM (Firebase Cloud Messaging) HTTP v1 via a service-account, opt-in per
+    # mailbox: a client registers {\"channel\":\"fcm\",\"token\":\"<device token>\"}.
+    fcm_project = os.getenv("FCM_PROJECT_ID", "")
+    fcm_base = os.getenv("FCM_BASE_URL", "https://fcm.googleapis.com").rstrip("/")
+    fcm_token_url = os.getenv("FCM_TOKEN_URL", "https://oauth2.googleapis.com/token")
+    fcm_include_payload = os.getenv("FCM_INCLUDE_PAYLOAD", "").lower() in ("1", "true", "yes", "on")
+    fcm_account = load_fcm_account(os.getenv("FCM_CREDENTIALS", ""))
     generic_channels = {"unifiedpush", "http", "webhook"}
-    push_channels = generic_channels | ({"ntfy"} if ntfy_url else set())
-    push_state: dict[str, Any] = {"session": None, "reaper": None, "tasks": set()}
+    push_channels = generic_channels | ({"ntfy"} if ntfy_url else set()) | ({"fcm"} if fcm_account else set())
+    push_state: dict[str, Any] = {"session": None, "reaper": None, "tasks": set(), "fcm": {"account": fcm_account, "token": None, "expires": 0.0}}
     waiters: dict[str, list[asyncio.Future[dict[str, Any]]]] = {}
     subscribers: dict[str, set[Subscriber]] = {}
     static_cache = {"Cache-Control": "max-age=3600"}
@@ -74,7 +96,7 @@ def build_app() -> web.Application:
         "retention": {"message_ttl_seconds": store.message_ttl, "mailbox_ttl_seconds": store.mailbox_ttl},
         "wait": {"timeout_seconds": float(os.getenv("WAIT_TIMEOUT_SECONDS", "0"))},
         "sse": {"enabled": True, "keepalive_seconds": env_float("SSE_KEEPALIVE_SECONDS", 15), "queue_max": int(os.getenv("SSE_QUEUE_MAX", "256"))},
-        "subscriptions": {"enabled": True, "channels": sorted(push_channels), "ntfy_url": ntfy_url or None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
+        "subscriptions": {"enabled": True, "channels": sorted(push_channels), "ntfy_url": ntfy_url or None, "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
         "cleanup_interval_seconds": cleanup_interval,
         "persistence": store.db is not None,
     }
@@ -309,17 +331,68 @@ def build_app() -> web.Application:
             headers["Authorization"] = f"Bearer {ntfy_token}"
         return headers
 
+    async def fcm_access_token(session: ClientSession) -> str | None:
+        state = push_state["fcm"]
+        now = time.time()
+        if state["token"] and state["expires"] > now + 30:
+            return state["token"]
+        account = state["account"]
+        if not account:
+            return None
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        def b64(data: bytes) -> bytes:
+            return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+        header = b64(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+        claims = b64(json.dumps({"iss": account["client_email"], "scope": "https://www.googleapis.com/auth/firebase.messaging", "aud": fcm_token_url, "iat": int(now), "exp": int(now) + 3600}).encode())
+        signing_input = header + b"." + claims
+        key = serialization.load_pem_private_key(account["private_key"].encode(), password=None)
+        assertion = (signing_input + b"." + b64(key.sign(signing_input, padding.PKCS1v15(), hashes.SHA256()))).decode()
+        try:
+            async with session.post(fcm_token_url, data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": assertion}, timeout=ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json()
+        except Exception:
+            return None
+        state["token"] = payload.get("access_token")
+        state["expires"] = now + float(payload.get("expires_in", 3600))
+        return state["token"]
+
+    async def fcm_send(session: ClientSession, subscription: Any, kind: str, mailbox: str, data: dict[str, Any]) -> int | None:
+        access = await fcm_access_token(session)
+        project = fcm_project or (push_state["fcm"]["account"] or {}).get("project_id")
+        if not access or not project:
+            return None
+        message: dict[str, Any] = {"token": subscription.endpoint, "android": {"priority": "high"}}
+        if kind == "page":
+            message["data"] = {"type": "page", "mailbox": mailbox, "id": str(data.get("id", ""))}
+            if fcm_include_payload:
+                message["notification"] = {"title": "PagerMCP", "body": str(data.get("message", "New page"))}
+        else:
+            message["data"] = {"type": "warning", "reason": "subscription-expiring"}
+        try:
+            async with session.post(f"{fcm_base}/v1/projects/{project}/messages:send", json={"message": message}, headers={"Authorization": f"Bearer {access}"}, timeout=ClientTimeout(total=10)) as response:
+                return response.status
+        except Exception:
+            return None
+
     async def push_trigger(session: ClientSession, token: str, subscription: Any, data: dict[str, Any]) -> None:
         try:
             timeout = ClientTimeout(total=10)
-            if subscription.channel == "ntfy":
+            if subscription.channel == "fcm":
+                status = await fcm_send(session, subscription, "page", token, data)
+            elif subscription.channel == "ntfy":
                 async with session.post(subscription.endpoint, data=f"New page in mailbox {token}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
                     status = response.status
             else:
                 body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
                 async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
                     status = response.status
-            if status in (404, 410):
+            remove_on = (400, 404, 410) if subscription.channel == "fcm" else (404, 410)
+            if status is not None and status in remove_on:
                 store.remove_subscription(token, subscription.id)
         except Exception:
             pass
@@ -328,16 +401,18 @@ def build_app() -> web.Application:
         """Warn a subscription that its lease is about to end, so the client can renew before push turns itself off."""
         try:
             timeout = ClientTimeout(total=10)
-            if subscription.channel == "ntfy":
+            if subscription.channel == "fcm":
+                status = await fcm_send(session, subscription, "warning", subscription.mailbox, {})
+            elif subscription.channel == "ntfy":
                 async with session.post(subscription.endpoint, data=b"PagerMCP: push expires soon", headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
                     status = response.status
             else:
                 body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
                 async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
                     status = response.status
-            if status in (404, 410):
+            if status is not None and status in ((400, 404, 410) if subscription.channel == "fcm" else (404, 410)):
                 store.remove_subscription(subscription.mailbox, subscription.id)
-            elif status < 400:
+            elif status is not None and status < 400:
                 store.mark_warned(subscription.id)
         except Exception:
             pass
@@ -368,9 +443,17 @@ def build_app() -> web.Application:
                 raise web.HTTPBadRequest(text="a valid topic is required for the ntfy channel")
             endpoint = f"{ntfy_url}/{topic}"
             keys = {"topic": str(topic)}
+        elif str(channel) == "fcm":
+            if not fcm_account:
+                raise web.HTTPBadRequest(text="fcm channel is not configured (set FCM_CREDENTIALS)")
+            device = body.get("token")
+            if not device or not re.match(r"^[A-Za-z0-9_:\-]{10,4096}$", str(device)):
+                raise web.HTTPBadRequest(text="a device token is required for the fcm channel")
+            endpoint = str(device)
+            keys = None
         if not channel or not endpoint:
             raise web.HTTPBadRequest(text="channel and endpoint are required")
-        if not re.match(r"^https?://", str(endpoint)):
+        if str(channel) != "fcm" and not re.match(r"^https?://", str(endpoint)):
             raise web.HTTPBadRequest(text="endpoint must be an http(s) URL")
         subscription = store.add_subscription(token, str(channel), str(endpoint), keys if isinstance(keys, dict) else None)
         if subscription is None:

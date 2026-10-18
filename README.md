@@ -128,6 +128,10 @@ curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/js
 curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' \
   -d '{"channel":"ntfy","topic":"pager-mypc"}'
 
+# or via Firebase Cloud Messaging (the server sets FCM_CREDENTIALS + FCM_PROJECT_ID)
+curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' \
+  -d '{"channel":"fcm","token":"<device registration token>"}'
+
 # renew before it expires, or push silently turns off
 curl -X POST "$B/mailboxes/$UUID/subscriptions" -H 'Content-Type: application/json' -d '{"id":"<id>"}'
 
