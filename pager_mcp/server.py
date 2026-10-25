@@ -232,7 +232,13 @@ def build_app() -> web.Application:
     async def pending(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
-        return web.json_response({"messages": [page_data(page) for page in store.pending(token)]})
+        order = request.query.get("order", "oldest")
+        if order not in ("oldest", "asc", "newest", "desc"):
+            raise web.HTTPBadRequest(text="order must be oldest/asc or newest/desc")
+        pages = store.pending(token)
+        if order in ("newest", "desc"):
+            pages = list(reversed(pages))
+        return web.json_response({"messages": [page_data(page) for page in pages]})
     async def consume(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         page = store.pop(token)

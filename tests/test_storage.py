@@ -197,7 +197,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.9.0"
+        assert data["version"] == "0.10.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -948,6 +948,29 @@ def test_webclient_mode_lease_expiry_drops_retained():
     store.purge()
     assert store.pending(token) == []
     assert store.webclient_active(token) is False
+
+
+@pytest.mark.asyncio
+async def test_messages_order_query(monkeypatch):
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post("/notify", json={"uuid": token, "message": "one"})
+        await asyncio.sleep(0.02)
+        await client.post("/notify", json={"uuid": token, "message": "two"})
+        oldest = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        newest = (await (await client.get(f"/mailboxes/{token}/messages?order=newest")).json())["messages"]
+        assert [m["message"] for m in oldest] == ["one", "two"]
+        assert [m["message"] for m in newest] == ["two", "one"]
+        # the queue itself stays FIFO: /wait returns the oldest
+        delivered = await (await client.get(f"/mailboxes/{token}/wait?timeout_seconds=2")).json()
+        assert delivered["message"] == "one"
+        bad = await client.get(f"/mailboxes/{token}/messages?order=sideways")
+        assert bad.status == 400
+    finally:
+        await client.close()
 
 
 def test_pager_plugin_syntax():

@@ -172,7 +172,7 @@ curl "$B/mailboxes/$UUID/mode"       # {"webclient": true, "expires": <unix>}
 curl -X POST "$B/mailboxes/$UUID/mode" -H 'Content-Type: application/json' -d '{"webclient":false}'
 ```
 
-While it is on, `POST /ack` marks a message as read (`"acked": true`) and keeps it in the queue instead of deleting it; `/messages` shows read and unread messages, and `/wait` still only delivers unread ones. New messages are queued normally; only when the 128-message cap is reached is the oldest read message evicted. Read copies expire with the normal message retention. The mode is a lease (`WEBCLIENT_TTL_DAYS`, default 7 days): refresh it before it expires, or the mode lapses, the read copies are dropped and ack deletes again. With the mode off (the default) everything behaves exactly as before.
+While it is on, `POST /ack` marks a message as read (`"acked": true`) and keeps it in the queue instead of deleting it; `/messages` shows read and unread messages, and `/wait` still only delivers unread ones. `GET /messages` is oldest-first; add `?order=newest` to list newest-first (the queue itself stays FIFO). New messages are queued normally; only when the 128-message cap is reached is the oldest read message evicted. Read copies expire with the normal message retention. The mode is a lease (`WEBCLIENT_TTL_DAYS`, default 7 days): refresh it before it expires, or the mode lapses, the read copies are dropped and ack deletes again. With the mode off (the default) everything behaves exactly as before.
 
 ## Server settings
 
