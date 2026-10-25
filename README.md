@@ -162,6 +162,18 @@ Enable it:
 The credentials file is read **once at startup**, so it must be present on every (re)start; rotate by replacing it and restarting. Never commit it — pass it as a Docker secret.
 
 
+## Web client retention
+
+A web UI often wants to keep showing a message after the user has read it. Enable the per-mailbox mode:
+
+```bash
+curl -X POST "$B/mailboxes/$UUID/mode" -H 'Content-Type: application/json' -d '{"webclient":true}'
+curl "$B/mailboxes/$UUID/mode"       # {"webclient": true, "expires": <unix>}
+curl -X POST "$B/mailboxes/$UUID/mode" -H 'Content-Type: application/json' -d '{"webclient":false}'
+```
+
+While it is on, `POST /ack` marks a message as read (`"acked": true`) and keeps it in the queue instead of deleting it; `/messages` shows read and unread messages, and `/wait` still only delivers unread ones. New messages are queued normally; only when the 128-message cap is reached is the oldest read message evicted. Read copies expire with the normal message retention. The mode is a lease (`WEBCLIENT_TTL_DAYS`, default 7 days): refresh it before it expires, or the mode lapses, the read copies are dropped and ack deletes again. With the mode off (the default) everything behaves exactly as before.
+
 ## Server settings
 
 `GET /settings` returns the server's effective, non-secret settings — message/mailbox limits, retention windows, the default wait timeout, SSE keepalive, push-subscription lease and warning windows, supported channels, cleanup interval, and whether storage is persistent — so a client can align itself without guessing. It exposes no addresses or secrets.

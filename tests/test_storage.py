@@ -197,7 +197,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.8.1"
+        assert data["version"] == "0.9.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -854,6 +854,100 @@ async def test_fcm_channel_requires_config(monkeypatch):
         assert resp.status == 400
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_webclient_mode_retains_ack_until_new_message(monkeypatch):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        enabled = await client.post(f"/mailboxes/{token}/mode", json={"webclient": True})
+        assert enabled.status == 200
+        body = await enabled.json()
+        assert body["webclient"] is True and body["expires"] > time.time()
+
+        accepted = await client.post("/notify", json={"uuid": token, "message": "first"})
+        page_id = (await accepted.json())["id"]
+        delivered = await (await client.get(f"/mailboxes/{token}/wait?timeout_seconds=3")).json()
+        assert delivered["id"] == page_id and delivered["acked"] is False
+
+        acked = await (await client.post(f"/mailboxes/{token}/ack", json={"id": page_id})).json()
+        assert acked["acked"] is True and acked["retained"] is True
+
+        messages = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        assert [m["id"] for m in messages] == [page_id]
+        assert messages[0]["acked"] is True
+
+        # a retained (acked) page is never redelivered by /wait
+        again = await client.get(f"/mailboxes/{token}/wait?timeout_seconds=0.05")
+        assert again.status == 408
+
+        # a new message is queued normally; the retained (read) copy stays until
+        # the queue is full, then the oldest read message is evicted
+        await client.post("/notify", json={"uuid": token, "message": "second"})
+        messages = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        assert [m["message"] for m in messages] == ["first", "second"]
+        assert [m["acked"] for m in messages] == [True, False]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_webclient_mode_disable_drops_retained(monkeypatch):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post(f"/mailboxes/{token}/mode", json={"webclient": True})
+        accepted = await client.post("/notify", json={"uuid": token, "message": "keep"})
+        page_id = (await accepted.json())["id"]
+        await client.post(f"/mailboxes/{token}/ack", json={"id": page_id})
+        assert len((await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]) == 1
+        disabled = await client.post(f"/mailboxes/{token}/mode", json={"webclient": False})
+        assert (await disabled.json())["webclient"] is False
+        assert (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_webclient_mode_evicts_oldest_read_when_full(monkeypatch):
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MAX_MESSAGES_PER_MAILBOX", "2")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        await client.post(f"/mailboxes/{token}/mode", json={"webclient": True})
+        first = await (await client.post("/notify", json={"uuid": token, "message": "a"})).json()
+        await client.post(f"/mailboxes/{token}/ack", json={"id": first["id"]})
+        assert (await client.post("/notify", json={"uuid": token, "message": "b"})).status == 202
+        # queue is full (a=read, b=unread): a new message evicts the oldest read one
+        assert (await client.post("/notify", json={"uuid": token, "message": "c"})).status == 202
+        messages = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        assert [m["message"] for m in messages] == ["b", "c"]
+        assert all(m["acked"] is False for m in messages)
+    finally:
+        await client.close()
+
+
+def test_webclient_mode_lease_expiry_drops_retained():
+    store = MailboxStore(None, 30 * 86400, 7 * 86400, 128)
+    token = "00000000-0000-0000-0000-00000000000c"
+    page = store.enqueue(token, {"message": "x"})
+    store.set_webclient(token, time.time() + 0.05)
+    store.retain(token, page.id)
+    assert store.pending(token)[0].acked is True
+    time.sleep(0.1)
+    store.purge()
+    assert store.pending(token) == []
+    assert store.webclient_active(token) is False
 
 
 def test_pager_plugin_syntax():

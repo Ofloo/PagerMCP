@@ -16,6 +16,7 @@ class Page:
     mailbox: str
     payload: dict[str, Any]
     created_at: float
+    acked: bool = False
 
 
 @dataclass(frozen=True)
@@ -42,15 +43,21 @@ class MailboxStore:
         self.db: sqlite3.Connection | None = None
         self.mailboxes: dict[str, tuple[float, list[Page]]] = {}
         self.subscriptions: dict[str, list[Subscription]] = {}
+        self.modes: dict[str, float] = {}
         if data_dir:
             path = Path(data_dir)
             path.mkdir(parents=True, exist_ok=True)
             self.db = sqlite3.connect(path / "pager.sqlite3", check_same_thread=False)
             self.db.execute("CREATE TABLE IF NOT EXISTS mailboxes (token TEXT PRIMARY KEY, last_seen REAL NOT NULL)")
-            self.db.execute("CREATE TABLE IF NOT EXISTS pages (id TEXT PRIMARY KEY, token TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS pages (id TEXT PRIMARY KEY, token TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL, acked INTEGER NOT NULL DEFAULT 0)")
             self.db.execute("CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY, token TEXT NOT NULL, channel TEXT NOT NULL, endpoint TEXT NOT NULL, keys TEXT, created REAL NOT NULL, renewed REAL NOT NULL, expires REAL NOT NULL, warned REAL NOT NULL DEFAULT 0)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS mailbox_modes (token TEXT PRIMARY KEY, webclient_expires REAL NOT NULL)")
             try:
                 self.db.execute("ALTER TABLE push_subscriptions ADD COLUMN warned REAL NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                self.db.execute("ALTER TABLE pages ADD COLUMN acked INTEGER NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             self.db.commit()
@@ -63,11 +70,20 @@ class MailboxStore:
         cutoff_box = now - self.mailbox_ttl if self.mailbox_ttl else float("-inf")
         if self.db:
             self.db.execute("DELETE FROM pages WHERE created < ?", (cutoff_page,))
+            # A webclient mode that was not refreshed lapses: drop the retained (acked) copies.
+            self.db.execute("DELETE FROM pages WHERE acked=1 AND token IN (SELECT token FROM mailbox_modes WHERE webclient_expires <= ?)", (now,))
+            self.db.execute("DELETE FROM mailbox_modes WHERE webclient_expires <= ?", (now,))
             self.db.execute("DELETE FROM mailboxes WHERE last_seen < ? AND token NOT IN (SELECT DISTINCT token FROM pages)", (cutoff_box,))
             self.db.execute("DELETE FROM push_subscriptions WHERE expires <= ?", (now,))
             self.db.execute("DELETE FROM push_subscriptions WHERE token NOT IN (SELECT token FROM mailboxes) AND token NOT IN (SELECT DISTINCT token FROM pages)")
             self.db.commit()
         else:
+            for token in list(self.modes):
+                if self.modes[token] <= now:
+                    del self.modes[token]
+                    if token in self.mailboxes:
+                        last_seen, pages = self.mailboxes[token]
+                        self.mailboxes[token] = (last_seen, [page for page in pages if not page.acked])
             for token, (last_seen, pages) in list(self.mailboxes.items()):
                 pages[:] = [page for page in pages if page.created_at >= cutoff_page]
                 if last_seen < cutoff_box and not pages:
@@ -105,10 +121,13 @@ class MailboxStore:
             self.touch(token)
             now = time.time()
             page = Page(str(uuid.uuid4()), token, payload, now)
-            if len(self.pending(token)) >= self.max_messages:
+            # New messages are queued normally; only when the queue is full do we
+            # make room by dropping the oldest *read* (acked) copy. No read copy
+            # means the mailbox is genuinely full.
+            if len(self.pending(token)) >= self.max_messages and not self.evict_oldest_acked(token):
                 return None
             if self.db:
-                self.db.execute("INSERT INTO pages VALUES(?,?,?,?)", (page.id, token, json.dumps(payload), now))
+                self.db.execute("INSERT INTO pages VALUES(?,?,?,?,?)", (page.id, token, json.dumps(payload), now, 0))
                 self.db.commit()
             else:
                 last_seen, pages = self.mailboxes[token]
@@ -116,16 +135,39 @@ class MailboxStore:
                 self.mailboxes[token] = (last_seen, pages)
             return page
 
+    def evict_oldest_acked(self, token: str) -> bool:
+        """Remove the oldest retained (acked/read) message. Returns False if there is none."""
+        with self.lock:
+            if self.db:
+                row = self.db.execute("SELECT id FROM pages WHERE token=? AND acked=1 ORDER BY created,id LIMIT 1", (token,)).fetchone()
+                if not row:
+                    return False
+                self.db.execute("DELETE FROM pages WHERE id=?", (row[0],))
+                self.db.commit()
+                return True
+            last_seen, pages = self.mailboxes.get(token, (0, []))
+            for index, page in enumerate(pages):
+                if page.acked:
+                    del pages[index]
+                    return True
+            return False
+
     def pending(self, token: str) -> list[Page]:
+        """All queued messages, including retained (acked) copies, oldest first."""
         with self.lock:
             self._purge(time.time())
             if self.db:
-                rows = self.db.execute("SELECT id,token,payload,created FROM pages WHERE token=? ORDER BY created,id", (token,)).fetchall()
-                return [Page(row[0], row[1], json.loads(row[2]), row[3]) for row in rows]
+                rows = self.db.execute("SELECT id,token,payload,created,acked FROM pages WHERE token=? ORDER BY created,id", (token,)).fetchall()
+                return [Page(row[0], row[1], json.loads(row[2]), row[3], bool(row[4])) for row in rows]
             return list(self.mailboxes.get(token, (0, []))[1])
 
+    def unacked(self, token: str) -> list[Page]:
+        """Only messages that have not been acknowledged (what /wait may deliver)."""
+        with self.lock:
+            return [page for page in self.pending(token) if not page.acked]
+
     def pop(self, token: str) -> Page | None:
-        pages = self.pending(token)
+        pages = self.unacked(token)
         if not pages:
             return None
         page = pages[0]
@@ -135,7 +177,7 @@ class MailboxStore:
                 self.db.commit()
             else:
                 last_seen, stored = self.mailboxes[token]
-                self.mailboxes[token] = (last_seen, stored[1:])
+                self.mailboxes[token] = (last_seen, [item for item in stored if item.id != page.id])
         return page
 
     def remove(self, page_id: str) -> None:
@@ -146,6 +188,68 @@ class MailboxStore:
             else:
                 for token, (last_seen, pages) in self.mailboxes.items():
                     self.mailboxes[token] = (last_seen, [page for page in pages if page.id != page_id])
+
+    def retain(self, token: str, page_id: str | None = None) -> Page | None:
+        """Acknowledge a message but keep it (webclient mode).
+
+        The page is flagged `acked` (read) and stays in the queue, counting
+        towards the cap; it is evicted when the queue fills or when the webclient
+        mode lapses.
+        """
+        with self.lock:
+            pages = self.pending(token)
+            target = next((p for p in pages if p.id == page_id), None) if page_id else next((p for p in pages if not p.acked), None)
+            if target is None:
+                return None
+            if self.db:
+                self.db.execute("UPDATE pages SET acked=1 WHERE id=?", (target.id,))
+                self.db.commit()
+            else:
+                last_seen, stored = self.mailboxes[token]
+                self.mailboxes[token] = (last_seen, [Page(p.id, p.mailbox, p.payload, p.created_at, True if p.id == target.id else p.acked) for p in stored])
+            return Page(target.id, target.mailbox, target.payload, target.created_at, True)
+
+    def drop_acked(self, token: str) -> None:
+        with self.lock:
+            if self.db:
+                self.db.execute("DELETE FROM pages WHERE token=? AND acked=1", (token,))
+                self.db.commit()
+            elif token in self.mailboxes:
+                last_seen, pages = self.mailboxes[token]
+                self.mailboxes[token] = (last_seen, [page for page in pages if not page.acked])
+
+    def set_webclient(self, token: str, expires: float | None) -> None:
+        """Enable (with an expiry) or disable (None) webclient retention for a mailbox."""
+        with self.lock:
+            self.touch(token)
+            if expires is None:
+                self.drop_acked(token)
+                if self.db:
+                    self.db.execute("DELETE FROM mailbox_modes WHERE token=?", (token,))
+                    self.db.commit()
+                else:
+                    self.modes.pop(token, None)
+            elif self.db:
+                self.db.execute("INSERT INTO mailbox_modes(token,webclient_expires) VALUES(?,?) ON CONFLICT(token) DO UPDATE SET webclient_expires=excluded.webclient_expires", (token, expires))
+                self.db.commit()
+            else:
+                self.modes[token] = expires
+
+    def webclient_expires(self, token: str) -> float | None:
+        with self.lock:
+            self._purge(time.time())
+            if self.db:
+                row = self.db.execute("SELECT webclient_expires FROM mailbox_modes WHERE token=?", (token,)).fetchone()
+                return row[0] if row else None
+            return self.modes.get(token)
+
+    def webclient_active(self, token: str, now: float | None = None) -> bool:
+        with self.lock:
+            moment = time.time() if now is None else now
+            if self.db:
+                row = self.db.execute("SELECT webclient_expires FROM mailbox_modes WHERE token=?", (token,)).fetchone()
+                return bool(row and row[0] > moment)
+            return self.modes.get(token, 0) > moment
 
     def add_subscription(self, token: str, channel: str, endpoint: str, keys: dict[str, Any] | None) -> Subscription | None:
         """Register a push subscription with a fresh lease. Returns None if the mailbox already has the maximum number of active subscriptions."""

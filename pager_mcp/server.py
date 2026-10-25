@@ -66,6 +66,10 @@ def build_app() -> web.Application:
     )
     cleanup_interval = env_float("CLEANUP_INTERVAL_SECONDS", 3600)
     warn_seconds = env_float("SUBSCRIPTION_WARN_DAYS", 3)
+    # Webclient retention lease: a mailbox that enables it keeps acked messages
+    # until a new message arrives; the client must refresh the mode within this
+    # window or retention lapses. Defaults to the message retention (same lifetime).
+    webclient_ttl = env_float("WEBCLIENT_TTL_DAYS", 0) or store.message_ttl
     # Channels that receive a content-less JSON trigger. `ntfy` is added when an
     # ntfy server is configured; it publishes a plain-text wake-up to a topic.
     ntfy_url = os.getenv("NTFY_URL", "").rstrip("/")
@@ -98,6 +102,7 @@ def build_app() -> web.Application:
         "sse": {"enabled": True, "keepalive_seconds": env_float("SSE_KEEPALIVE_SECONDS", 15), "queue_max": int(os.getenv("SSE_QUEUE_MAX", "256"))},
         "subscriptions": {"enabled": True, "channels": sorted(push_channels), "ntfy_url": ntfy_url or None, "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
         "cleanup_interval_seconds": cleanup_interval,
+        "webclient": {"ttl_seconds": webclient_ttl},
         "persistence": store.db is not None,
     }
 
@@ -153,16 +158,16 @@ def build_app() -> web.Application:
         return web.json_response({"uuid": token})
 
     def page_data(page: Any) -> dict[str, Any]:
-        return {"id": page.id, "created_at": page.created_at, "age_seconds": max(0, int(time.time() - page.created_at)), **page.payload}
+        return {"id": page.id, "created_at": page.created_at, "age_seconds": max(0, int(time.time() - page.created_at)), **page.payload, "acked": page.acked}
 
     def take_fresh(token: str, max_age: float | None) -> Any:
-        # Return the oldest queued page within the age window *without removing it*.
-        # Pages outside the window are discarded (removed) so a stale page cannot
-        # pin the head of the queue forever. Removal of a delivered page is the
-        # client's job via /ack, which makes delivery at-least-once: a waiter that
-        # dies before acknowledging cannot swallow the page.
+        # Return the oldest *unacked* page within the age window without removing
+        # it. Pages outside the window are discarded so a stale page cannot pin the
+        # head of the queue forever. Removal of a delivered page is the client's
+        # job via /ack, which makes delivery at-least-once: a waiter that dies
+        # before acknowledging cannot swallow the page.
         now = time.time()
-        for page in store.pending(token):
+        for page in store.unacked(token):
             if max_age is not None and now - page.created_at > max_age:
                 store.remove(page.id)
                 continue
@@ -244,12 +249,40 @@ def build_app() -> web.Application:
                 body = None
             if isinstance(body, dict):
                 page_id = body.get("id")
+        if store.webclient_active(token):
+            # Webclient retention: acknowledge but keep a copy in the queue until a
+            # new message arrives (or the mode lease lapses).
+            retained = store.retain(token, str(page_id) if page_id else None)
+            return web.json_response({"acked": retained is not None, "retained": retained is not None, "id": retained.id if retained else (str(page_id) if page_id else None)})
         if page_id:
             store.remove(str(page_id))
         else:
             oldest = store.pop(token)
             page_id = oldest.id if oldest else None
-        return web.json_response({"acked": page_id is not None, "id": page_id})
+        return web.json_response({"acked": page_id is not None, "retained": False, "id": page_id})
+
+    async def get_mode(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        expires = store.webclient_expires(token)
+        active = expires is not None and expires > time.time()
+        return web.json_response({"webclient": active, "expires": expires if active else None})
+
+    async def set_mode(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="invalid JSON") from exc
+        if not isinstance(body, dict) or not isinstance(body.get("webclient"), bool):
+            raise web.HTTPBadRequest(text="webclient must be true or false")
+        if body["webclient"]:
+            expires = time.time() + webclient_ttl
+            store.set_webclient(token, expires)
+            return web.json_response({"webclient": True, "expires": expires})
+        store.set_webclient(token, None)
+        return web.json_response({"webclient": False, "expires": None})
 
     async def wait(request: web.Request) -> web.Response:
         token = request.match_info["token"]
@@ -494,15 +527,18 @@ def build_app() -> web.Application:
         token = request.match_info["token"]
         store.touch(token)
         subscriptions = store.subscriptions_for(token)
+        mode_expires = store.webclient_expires(token)
         return web.json_response({
             "mailbox": token,
             "messages": len(store.pending(token)),
+            "unacked": len(store.unacked(token)),
             "push": {
                 "enabled": bool(subscriptions),
                 "subscriptions": len(subscriptions),
                 "channels": sorted({sub.channel for sub in subscriptions}),
                 "next_expiry": min((sub.expires for sub in subscriptions), default=None),
             },
+            "webclient": {"enabled": mode_expires is not None, "expires": mode_expires},
             "retention": {"message_ttl_seconds": store.message_ttl, "mailbox_ttl_seconds": store.mailbox_ttl},
         })
 
@@ -536,7 +572,7 @@ def build_app() -> web.Application:
             await push_state["session"].close()
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
