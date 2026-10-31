@@ -87,6 +87,21 @@ variable the server understands (`DATA_DIR`, `*_TTL_DAYS`, `MAX_*`, `SSE_*`,
 `NTFY_*`, `FCM_*`, ...) can be passed this way. For FCM, point
 `FCM_CREDENTIALS` at a service-account JSON file inside the jail.
 
+## Releasing
+
+Every release also updates this template so a jail runs the same version:
+
+```sh
+./deploy/bastille/sync.sh <version> <build>   # sets PAGER_VERSION / PAGER_BUILD
+printf '%s\n' <build> > .build_number         # reserve the number for Bastille
+git add deploy/bastille && git commit -m "Bastille template: <version> build <build>" && git push
+```
+
+`<build>` is the next free sequential number (the one after the release's tag and
+`latest` builds), so the jail's build stays distinguishable from Docker's. Then
+copy and apply the template on the host and verify `/version` reports
+`<version>` build `<build>`.
+
 ## Service control
 
 ```bash
