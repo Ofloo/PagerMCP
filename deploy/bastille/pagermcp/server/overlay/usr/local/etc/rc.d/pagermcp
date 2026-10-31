@@ -33,6 +33,7 @@ export HOST="${pagermcp_host}"
 export PORT="${pagermcp_port}"
 export DATA_DIR="${pagermcp_data_dir}"
 export PYTHONPATH="/usr/local/lib/pagermcp"
+export HOSTNAME="$(hostname)"
 for _kv in ${pagermcp_env}; do
     export "${_kv}"
 done
