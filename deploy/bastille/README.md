@@ -18,19 +18,31 @@ the same environment-variable configuration.
 ## Requirements on the host
 
 - Bastille with a bootstrapped release (`bastille bootstrap 15.1-RELEASE`).
-- The jail needs **outbound network** (DNS + HTTPS) for `pkg` and the source
-  fetch, and its address must be reachable by clients. A jail whose address is
-  only on the loopback bridge (`bastille0`) has no route out. On a host where
-  Bastille uses loopback-only networking, add the jail address as an alias on the
-  external interface for outbound *and* on `bastille0` for host reachability, e.g.:
+- An address that is routed on the **external** interface (not only on the
+  loopback bridge `bastille0`, which has no uplink). A VNET jail on a bridge is
+  the cleanest; for a non-VNET jail put the address on the external interface and
+  bind the jail to it:
 
   ```sh
   ifconfig vtnet0 inet 10.13.40.201/24 alias
-  ifconfig bastille0 inet 10.13.40.201/32 alias
   sysrc ifconfig_vtnet0_alias0="inet 10.13.40.201/24"
+  bastille config pager set ip4.addr 'vtnet0|10.13.40.201'
   ```
 
-  (A VNET jail on a bridged interface is the cleaner alternative.)
+  The jail needs outbound network for `pkg` and the source fetch; DNS must be
+  reachable (see `PAGER_NAMESERVER`).
+- The host firewall must allow the service port. Bastille's `/etc/pf.conf`
+  blocks all inbound except SSH, so add a rule and reload:
+
+  ```
+  pass in proto tcp from any to 10.13.40.201 port 8080 flags S/SA keep state
+  ```
+
+  ```sh
+  pfctl -nf /etc/pf.conf && pfctl -f /etc/pf.conf
+  ```
+
+  (`bastille rdr` is an alternative for forwarding a host port.)
 
 ## Apply
 
