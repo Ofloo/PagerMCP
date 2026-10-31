@@ -178,6 +178,10 @@ While it is on, `POST /ack` marks a message as read (`"acked": true`) and keeps 
 
 `GET /settings` returns the server's effective, non-secret settings — message/mailbox limits, retention windows, the default wait timeout, SSE keepalive, push-subscription lease and warning windows, supported channels, cleanup interval, and whether storage is persistent — so a client can align itself without guessing. It exposes no addresses or secrets.
 
+## FreeBSD / Bastille
+
+A Bastille template that installs the same server into a FreeBSD jail — dependencies from `pkg`, the same environment configuration — lives under `deploy/bastille/` in the repository. Apply it with `bastille template <jail> pagermcp/server`; configure it with `pagermcp_port` and `pagermcp_env` in `/etc/rc.conf`. A source install reports build `0` from `/version` (there is no Docker build number).
+
 ## Privacy
 
 PagerMCP logs nothing, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.

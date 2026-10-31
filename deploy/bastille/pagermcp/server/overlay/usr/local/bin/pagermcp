@@ -1,0 +1,5 @@
+#!/bin/sh
+# Launch the PagerMCP server. Environment (MODE, PORT, DATA_DIR, ...) is set by
+# the rc.d script.
+cd /usr/local/lib/pagermcp || exit 1
+exec /usr/local/bin/python3.12 -m pager_mcp.server

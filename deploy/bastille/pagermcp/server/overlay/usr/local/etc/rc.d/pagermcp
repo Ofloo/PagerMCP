@@ -1,0 +1,39 @@
+#!/bin/sh
+
+# PROVIDE: pagermcp
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="pagermcp"
+rcvar="pagermcp_enable"
+
+load_rc_config "${name}"
+
+: ${pagermcp_enable:="NO"}
+: ${pagermcp_mode:="server"}
+: ${pagermcp_host:="0.0.0.0"}
+: ${pagermcp_port:="8080"}
+: ${pagermcp_data_dir:="/var/db/pagermcp/data"}
+: ${pagermcp_user:="pagermcp"}
+: ${pagermcp_env:=""}
+
+pidfile="/var/db/pagermcp/pagermcp.pid"
+command="/usr/sbin/daemon"
+command_args="-p ${pidfile} -o /dev/null /usr/local/bin/pagermcp"
+procname="/usr/local/bin/python3.12"
+required_files="/usr/local/lib/pagermcp/pager_mcp/server.py"
+
+# The same environment variables the Docker image accepts. Anything extra
+# (retention, TTLs, ntfy, fcm, ...) can be passed through pagermcp_env.
+export MODE="${pagermcp_mode}"
+export HOST="${pagermcp_host}"
+export PORT="${pagermcp_port}"
+export DATA_DIR="${pagermcp_data_dir}"
+export PYTHONPATH="/usr/local/lib/pagermcp"
+for _kv in ${pagermcp_env}; do
+    export "${_kv}"
+done
+
+run_rc_command "$1"
