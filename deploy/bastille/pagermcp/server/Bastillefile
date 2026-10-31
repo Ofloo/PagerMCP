@@ -12,6 +12,12 @@
 ARG PAGER_VERSION=0.10.0
 ARG PAGER_PORT=8080
 ARG PAGER_DATA_DIR=/var/db/pagermcp/data
+# Optional: a reachable DNS server. Needed when the host's /etc/resolv.conf
+# points at a loopback resolver (127.0.0.1) that the jail cannot use, otherwise
+# the pkg/fetch steps below fail.
+ARG PAGER_NAMESERVER=
+
+CMD test -z "${PAGER_NAMESERVER}" || echo "nameserver ${PAGER_NAMESERVER}" > /etc/resolv.conf
 
 # Dependencies come from pkg (no pip, no build).
 PKG python312 py312-aiohttp py312-markdown py312-cryptography py312-sqlite3
@@ -38,4 +44,4 @@ SYSRC pagermcp_enable=YES
 SYSRC pagermcp_port=${PAGER_PORT}
 SYSRC pagermcp_data_dir=${PAGER_DATA_DIR}
 
-SERVICE pagermcp start
+CMD service pagermcp restart >/dev/null 2>&1 </dev/null &

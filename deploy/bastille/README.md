@@ -41,8 +41,12 @@ tar czf - -C deploy/bastille pagermcp | ssh root@host 'tar xzf - -C /usr/local/b
 
 # create a jail and apply the template
 bastille create -T pager 15.1-RELEASE 10.13.40.201
-bastille template -a pager pagermcp/server
+bastille template -a pager pagermcp/server --arg PAGER_NAMESERVER=10.13.40.1
 ```
+
+Pass `PAGER_NAMESERVER` when the host's `/etc/resolv.conf` uses `127.0.0.1`
+(a loopback resolver the jail cannot use); otherwise `pkg`/`fetch` fail with DNS
+errors.
 
 Override the version or port:
 
