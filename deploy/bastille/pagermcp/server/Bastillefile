@@ -10,6 +10,10 @@
 # Override the version with: --arg PAGER_VERSION=0.10.0
 
 ARG PAGER_VERSION=0.10.0
+# Build string reported from /version. The Docker tags use plain numbers
+# (v0.10.0 = 52, latest = 53); a Bastille install reports the type too, e.g.
+# "52-bastille", so you can tell the install type from the build alone.
+ARG PAGER_BUILD=52-bastille
 ARG PAGER_PORT=8080
 ARG PAGER_DATA_DIR=/var/db/pagermcp/data
 # Optional: a reachable DNS server. Needed when the host's /etc/resolv.conf
@@ -42,6 +46,7 @@ CMD chmod 755 /usr/local/etc/rc.d/pagermcp /usr/local/bin/pagermcp
 
 SYSRC pagermcp_enable=YES
 SYSRC pagermcp_port=${PAGER_PORT}
+SYSRC pagermcp_build=${PAGER_BUILD}
 SYSRC pagermcp_data_dir=${PAGER_DATA_DIR}
 
 CMD service pagermcp restart >/dev/null 2>&1 </dev/null &

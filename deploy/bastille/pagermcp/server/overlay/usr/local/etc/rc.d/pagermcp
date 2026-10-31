@@ -17,6 +17,7 @@ load_rc_config "${name}"
 : ${pagermcp_port:="8080"}
 : ${pagermcp_data_dir:="/var/db/pagermcp/data"}
 : ${pagermcp_user:="pagermcp"}
+: ${pagermcp_build:=""}
 : ${pagermcp_env:=""}
 
 pidfile="/var/db/pagermcp/pagermcp.pid"
@@ -35,5 +36,10 @@ export PYTHONPATH="/usr/local/lib/pagermcp"
 for _kv in ${pagermcp_env}; do
     export "${_kv}"
 done
+
+# Report the release build number from /version, matching the Docker tag.
+if [ -n "${pagermcp_build}" ]; then
+    export PAGERMCP_BUILD="${pagermcp_build}"
+fi
 
 run_rc_command "$1"
