@@ -52,13 +52,12 @@ Override the version or port:
 
 ```bash
 bastille template -a pager pagermcp/server \
-  --arg PAGER_VERSION=0.10.0 --arg PAGER_BUILD=52-bastille --arg PAGER_PORT=8080
+  --arg PAGER_VERSION=0.10.0 --arg PAGER_BUILD=54 --arg PAGER_PORT=8080
 ```
 
-`PAGER_BUILD` is the build string `/version` reports. Docker tags use plain
-numbers (`v0.10.0` = 52, `latest` = 53); a Bastille install defaults to
-`52-bastille`, so the install type is visible from the build alone. Override it
-with a plain number if you prefer.
+`PAGER_BUILD` is the build number `/version` reports. Docker tags use their
+sequential build number (`v0.10.0` = 52, `latest` = 53); a Bastille install uses
+the next number (54), so the install type is distinguishable from the build.
 
 ## Configuration (same env as Docker)
 
