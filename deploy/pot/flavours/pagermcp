@@ -1,0 +1,5 @@
+# Pot flavour for PagerMCP.
+# Run the application directly (the pot has no rc script); the wrapper starts the
+# server in the foreground so the pot's lifecycle is the process lifecycle.
+set-attribute -A no-rc-script -V YES
+set-cmd -c "/usr/local/bin/pagermcp"
