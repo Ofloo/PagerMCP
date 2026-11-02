@@ -45,6 +45,25 @@ On `POST /notify` the server sends each registered endpoint a **data-only trigge
 
 A mailbox can enable **webclient retention** with `POST /mailboxes/{uuid}/mode` `{"webclient": true}`; `GET /mailboxes/{uuid}/mode` returns `{"webclient": <bool>, "expires": <unix>}`, and `{"webclient": false}` turns it off. With it off (the default) acking behaves exactly as before. While it is on, `POST /ack` does **not** delete the message: it flags it `acked` (read) and keeps it in the queue, counting towards the message cap, and `/messages` shows it with `"acked": true`, so a web UI can keep showing read messages. New messages are queued normally; only when the queue is **full** (the 128-message cap) is the **oldest read (acked)** message evicted to make room — if there is no read message, the mailbox is genuinely full and new messages are rejected. Read copies also expire with the normal message retention. The mode carries a **lease** (`WEBCLIENT_TTL_DAYS`, default = the message retention, 7 days): the client must refresh it by posting again within that window, otherwise the mode lapses, the read copies are dropped, and the queue and ack return to normal behaviour. `/wait` only delivers **unacknowledged** messages.
 
+## P2P store-and-forward (optional)
+
+Clients that relay encrypted envelopes between peers may post the same envelope more than once (several peers reach the internet, or a retry). With `P2P_DEDUPE_ENABLED=true`, `POST /notify` accepts an optional idempotency envelope:
+
+```
+{"p2p": true, "p2p_id": "<uuid>", "p2p_expires_at": 1790604800, "p2p_created_at": 1790000000, "p2p_payload_sha256": "<advisory>"}
+```
+
+- `p2p_id` MUST be a stable UUID created once by the origin and reused unchanged by every relay and retry.
+- `p2p_expires_at` is required (absolute Unix seconds). An already-expired message returns `410 Gone` and is stored nowhere.
+- The server clamps the requested lifetime to `min(P2P_MAX_MESSAGE_AGE_SECONDS, MESSAGE_TTL_DAYS)`; a longer request returns `400`.
+- Dedupe is per mailbox: the same `p2p_id` delivered to another mailbox is a different message.
+- A repeat with the same `(mailbox, p2p_id)` and the same payload returns `200 {"id": "<existing id>", "duplicate": true}` and creates no second message or notification.
+- The same `p2p_id` with a different payload returns `409 Conflict`.
+- The dedupe cache stores ids/hashes and metadata only (never the payload), survives restarts (SQLite in `DATA_DIR`), and expires at `min(p2p_expires_at, seen_at + P2P_DEDUPE_TTL_SECONDS, seen_at + MESSAGE_TTL)`; it is capped by `P2P_DEDUPE_MAX_ENTRIES` and `P2P_DEDUPE_MAX_PER_MAILBOX` (oldest evicted first). The server computes the authoritative payload hash.
+- Requests without `p2p:true` behave exactly as before and never touch the cache.
+- Dedupe is best-effort: a duplicate that arrives after the cache entry expired is accepted again, so clients MUST still deduplicate incoming messages by `p2p_id`.
+- `GET /settings` reports the effective `p2p` policy.
+
 Messages left queued because no consumer was connected are delivered to the next `wait` regardless of age within the message retention window; deliver the queue oldest-first and use `age_seconds`/`created_at` to judge whether an old queued page is still relevant. Clients should surface the age to the operator (or pass `max_age_seconds`) rather than treating an old queued page as fresh.
 
 `GET /version` returns the running semantic version, sequential build number, and the container hostname, for example `{ "version": "0.1.0", "build": "42", "hostname": "pztqiyg6f5w6" }`. The client checks this endpoint at startup and reports a mismatch without preventing connection. The hostname identifies which replica/task answered, which is useful under Swarm where several tasks can run behind one endpoint.
@@ -93,4 +112,4 @@ A client may receive through `GET /wait` (long-poll) or `GET /events` (SSE push)
 
 ## Configuration
 
-`MODE`, `HOST`, `PORT`, `SERVER_URL`, `SERVER_HOST`, `SERVER_PORT`, `DATA_DIR`, `MAILBOX_TTL_DAYS`, `MESSAGE_TTL_DAYS`, `MAX_MESSAGES_PER_MAILBOX`, `MAX_MESSAGE_BYTES`, `WAIT_TIMEOUT_SECONDS`, `SSE_KEEPALIVE_SECONDS`, `SSE_QUEUE_MAX`, `SUBSCRIPTION_TTL_DAYS`, `SUBSCRIPTION_WARN_DAYS`, `MAX_SUBSCRIPTIONS_PER_MAILBOX`, `CLEANUP_INTERVAL_SECONDS`, `WEBCLIENT_TTL_DAYS`, `NTFY_URL`, `NTFY_TOKEN`, `FCM_CREDENTIALS`, `FCM_PROJECT_ID`, and `FCM_INCLUDE_PAYLOAD` are externally configurable on the server. The client honours `PAGER_URL`, `PAGER_SESSION_FILE`, `PAGER_SESSION_ID`, `PAGER_MAX_AGE_MS`, `PAGER_WAIT_SECONDS`, and `PAGER_TRANSPORT`.
+`MODE`, `HOST`, `PORT`, `SERVER_URL`, `SERVER_HOST`, `SERVER_PORT`, `DATA_DIR`, `MAILBOX_TTL_DAYS`, `MESSAGE_TTL_DAYS`, `MAX_MESSAGES_PER_MAILBOX`, `MAX_MESSAGE_BYTES`, `WAIT_TIMEOUT_SECONDS`, `SSE_KEEPALIVE_SECONDS`, `SSE_QUEUE_MAX`, `SUBSCRIPTION_TTL_DAYS`, `SUBSCRIPTION_WARN_DAYS`, `MAX_SUBSCRIPTIONS_PER_MAILBOX`, `CLEANUP_INTERVAL_SECONDS`, `WEBCLIENT_TTL_DAYS`, `P2P_DEDUPE_ENABLED`, `P2P_DEDUPE_TTL_SECONDS`, `P2P_MAX_MESSAGE_AGE_SECONDS`, `P2P_DEDUPE_MAX_ENTRIES`, `P2P_DEDUPE_MAX_PER_MAILBOX`, `NTFY_URL`, `NTFY_TOKEN`, `FCM_CREDENTIALS`, `FCM_PROJECT_ID`, and `FCM_INCLUDE_PAYLOAD` are externally configurable on the server. The client honours `PAGER_URL`, `PAGER_SESSION_FILE`, `PAGER_SESSION_ID`, `PAGER_MAX_AGE_MS`, `PAGER_WAIT_SECONDS`, and `PAGER_TRANSPORT`.

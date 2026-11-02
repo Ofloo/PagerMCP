@@ -33,17 +33,20 @@ class Subscription:
 
 
 class MailboxStore:
-    def __init__(self, data_dir: str | None, mailbox_ttl: float, message_ttl: float, max_messages: int, subscription_ttl: float = 0, max_subscriptions: int = 16):
+    def __init__(self, data_dir: str | None, mailbox_ttl: float, message_ttl: float, max_messages: int, subscription_ttl: float = 0, max_subscriptions: int = 16, p2p_max_entries: int = 1000, p2p_max_per_mailbox: int = 256):
         self.mailbox_ttl = mailbox_ttl
         self.message_ttl = message_ttl
         self.max_messages = max_messages
         self.subscription_ttl = subscription_ttl
         self.max_subscriptions = max_subscriptions
+        self.p2p_max_entries = p2p_max_entries
+        self.p2p_max_per_mailbox = p2p_max_per_mailbox
         self.lock = threading.RLock()
         self.db: sqlite3.Connection | None = None
         self.mailboxes: dict[str, tuple[float, list[Page]]] = {}
         self.subscriptions: dict[str, list[Subscription]] = {}
         self.modes: dict[str, float] = {}
+        self.p2p: dict[tuple[str, str], dict[str, Any]] = {}
         if data_dir:
             path = Path(data_dir)
             path.mkdir(parents=True, exist_ok=True)
@@ -52,6 +55,9 @@ class MailboxStore:
             self.db.execute("CREATE TABLE IF NOT EXISTS pages (id TEXT PRIMARY KEY, token TEXT NOT NULL, payload TEXT NOT NULL, created REAL NOT NULL, acked INTEGER NOT NULL DEFAULT 0)")
             self.db.execute("CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY, token TEXT NOT NULL, channel TEXT NOT NULL, endpoint TEXT NOT NULL, keys TEXT, created REAL NOT NULL, renewed REAL NOT NULL, expires REAL NOT NULL, warned REAL NOT NULL DEFAULT 0)")
             self.db.execute("CREATE TABLE IF NOT EXISTS mailbox_modes (token TEXT PRIMARY KEY, webclient_expires REAL NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS p2p_dedupe (mailbox TEXT NOT NULL, p2p_id TEXT NOT NULL, message_id TEXT NOT NULL, payload_sha256 TEXT NOT NULL, seen_at REAL NOT NULL, expires_at REAL NOT NULL, PRIMARY KEY (mailbox, p2p_id))")
+            self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_expires_idx ON p2p_dedupe(expires_at)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_seen_idx ON p2p_dedupe(seen_at)")
             try:
                 self.db.execute("ALTER TABLE push_subscriptions ADD COLUMN warned REAL NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
@@ -76,6 +82,7 @@ class MailboxStore:
             self.db.execute("DELETE FROM mailboxes WHERE last_seen < ? AND token NOT IN (SELECT DISTINCT token FROM pages)", (cutoff_box,))
             self.db.execute("DELETE FROM push_subscriptions WHERE expires <= ?", (now,))
             self.db.execute("DELETE FROM push_subscriptions WHERE token NOT IN (SELECT token FROM mailboxes) AND token NOT IN (SELECT DISTINCT token FROM pages)")
+            self.db.execute("DELETE FROM p2p_dedupe WHERE expires_at <= ?", (now,))
             self.db.commit()
         else:
             for token in list(self.modes):
@@ -95,6 +102,8 @@ class MailboxStore:
                 self.subscriptions[token] = [sub for sub in self.subscriptions[token] if sub.expires > now]
                 if not self.subscriptions[token]:
                     del self.subscriptions[token]
+            for key in [k for k, entry in self.p2p.items() if entry["expires_at"] <= now]:
+                del self.p2p[key]
 
     def touch(self, token: str) -> None:
         with self.lock:
@@ -250,6 +259,59 @@ class MailboxStore:
                 row = self.db.execute("SELECT webclient_expires FROM mailbox_modes WHERE token=?", (token,)).fetchone()
                 return bool(row and row[0] > moment)
             return self.modes.get(token, 0) > moment
+
+    def _enforce_p2p_caps(self, token: str) -> None:
+        if self.db:
+            excess = self.db.execute("SELECT COUNT(*) FROM p2p_dedupe WHERE mailbox=?", (token,)).fetchone()[0] - self.p2p_max_per_mailbox
+            if excess > 0:
+                self.db.execute("DELETE FROM p2p_dedupe WHERE rowid IN (SELECT rowid FROM p2p_dedupe WHERE mailbox=? ORDER BY seen_at ASC LIMIT ?)", (token, excess))
+            excess = self.db.execute("SELECT COUNT(*) FROM p2p_dedupe").fetchone()[0] - self.p2p_max_entries
+            if excess > 0:
+                self.db.execute("DELETE FROM p2p_dedupe WHERE rowid IN (SELECT rowid FROM p2p_dedupe ORDER BY seen_at ASC LIMIT ?)", (excess,))
+            self.db.commit()
+        else:
+            mine = sorted((key for key in self.p2p if key[0] == token), key=lambda key: self.p2p[key]["seen_at"])
+            for key in mine[: max(0, len(mine) - self.p2p_max_per_mailbox)]:
+                del self.p2p[key]
+            everything = sorted(self.p2p, key=lambda key: self.p2p[key]["seen_at"])
+            for key in everything[: max(0, len(everything) - self.p2p_max_entries)]:
+                del self.p2p[key]
+
+    def p2p_enqueue(self, token: str, p2p_id: str, payload: dict[str, Any], payload_sha256: str, cache_expires_at: float) -> tuple[str, Any]:
+        """Idempotent enqueue for a P2P message.
+
+        Returns ("new", Page) | ("duplicate", message_id) | ("conflict", None) |
+        ("full", None). The lookup and the queue/cache inserts happen under the
+        store lock (one commit), so concurrent identical posts create exactly one
+        message.
+        """
+        with self.lock:
+            now = time.time()
+            self._purge(now)
+            if self.db:
+                row = self.db.execute("SELECT message_id, payload_sha256 FROM p2p_dedupe WHERE mailbox=? AND p2p_id=?", (token, p2p_id)).fetchone()
+                if row:
+                    return ("duplicate", row[0]) if row[1] == payload_sha256 else ("conflict", None)
+            else:
+                entry = self.p2p.get((token, p2p_id))
+                if entry:
+                    return ("duplicate", entry["message_id"]) if entry["payload_sha256"] == payload_sha256 else ("conflict", None)
+            self.touch(token)
+            if len(self.pending(token)) >= self.max_messages:
+                return ("full", None)
+            page = Page(str(uuid.uuid4()), token, payload, now)
+            if self.db:
+                self.db.execute("INSERT INTO pages VALUES(?,?,?,?,?)", (page.id, token, json.dumps(payload), now, 0))
+                self.db.execute("INSERT INTO p2p_dedupe VALUES(?,?,?,?,?,?)", (token, p2p_id, page.id, payload_sha256, now, cache_expires_at))
+                self.db.commit()
+                self._enforce_p2p_caps(token)
+            else:
+                last_seen, pages = self.mailboxes[token]
+                pages.append(page)
+                self.mailboxes[token] = (last_seen, pages)
+                self.p2p[(token, p2p_id)] = {"message_id": page.id, "payload_sha256": payload_sha256, "seen_at": now, "expires_at": cache_expires_at}
+                self._enforce_p2p_caps(token)
+            return ("new", page)
 
     def add_subscription(self, token: str, channel: str, endpoint: str, keys: dict[str, Any] | None) -> Subscription | None:
         """Register a push subscription with a fresh lease. Returns None if the mailbox already has the maximum number of active subscriptions."""

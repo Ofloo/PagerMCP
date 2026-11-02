@@ -178,6 +178,23 @@ While it is on, `POST /ack` marks a message as read (`"acked": true`) and keeps 
 
 `GET /settings` returns the server's effective, non-secret settings — message/mailbox limits, retention windows, the default wait timeout, SSE keepalive, push-subscription lease and warning windows, supported channels, cleanup interval, and whether storage is persistent — so a client can align itself without guessing. It exposes no addresses or secrets.
 
+## P2P store-and-forward
+
+When several peers relay the same encrypted envelope, they can post it more than once. With `P2P_DEDUPE_ENABLED=true` the server deduplicates P2P posts by `(mailbox, p2p_id)`:
+
+```bash
+curl -X POST "$B/notify" -H "Authorization: Bearer $UUID" -H 'Content-Type: application/json' -d '{
+  "p2p": true,
+  "p2p_id": "0d6f0f6e-6f5b-4e8d-9f7c-2f5f7c7f9b21",
+  "p2p_expires_at": 1790604800,
+  "message": "encrypted-envelope"
+}'
+# first post: 200 {"id":"...","duplicate":false}
+# again:     200 {"id":"<same>","duplicate":true}  (no second message/notification)
+```
+
+The same `p2p_id` with different content returns `409`; an expired `p2p_expires_at` returns `410`; a lifetime above the server maximum returns `400`. Requests without `p2p:true` are unchanged and never touch the cache. The cache stores ids/hashes only, survives restarts, and expires at `min(p2p_expires_at, seen_at + P2P_DEDUPE_TTL_SECONDS, MESSAGE_TTL)` — never longer than the server's message retention. Dedupe is best-effort; clients still deduplicate by `p2p_id`. `GET /settings` reports the effective `p2p` policy.
+
 ## FreeBSD / Bastille
 
 A Bastille template that installs the same server into a FreeBSD jail — dependencies from `pkg`, the same environment configuration — lives under `deploy/bastille/` in the repository. Apply it with `bastille template <jail> pagermcp/server`; configure it with `pagermcp_port` and `pagermcp_env` in `/etc/rc.conf`. A source install reports build `0` from `/version` (there is no Docker build number).

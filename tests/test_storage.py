@@ -4,6 +4,7 @@ import os
 import socket
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -197,7 +198,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.10.0"
+        assert data["version"] == "0.11.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -971,6 +972,215 @@ async def test_messages_order_query(monkeypatch):
         assert bad.status == 400
     finally:
         await client.close()
+
+
+async def _p2p_post(client, token, p2p_id, message="m", expires_in=3600.0):
+    body = {"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": time.time() + expires_in, "message": message}
+    return await client.post("/notify", headers={"Authorization": f"Bearer {token}"}, json=body)
+
+
+@pytest.mark.asyncio
+async def test_p2p_disabled_rejects(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "false")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await _p2p_post(client, token, str(uuid.uuid4()))
+        assert resp.status == 403
+        assert (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_repeated_post_is_duplicate(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        p2p_id = str(uuid.uuid4())
+        first = await _p2p_post(client, token, p2p_id, "hello")
+        assert first.status == 200
+        d1 = await first.json()
+        assert d1["duplicate"] is False
+        second = await _p2p_post(client, token, p2p_id, "hello")
+        assert second.status == 200
+        d2 = await second.json()
+        assert d2["duplicate"] is True and d2["id"] == d1["id"]
+        messages = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        assert [m["id"] for m in messages] == [d1["id"]]
+        # the delivered message keeps the p2p id so the client can dedupe too
+        assert messages[0]["p2p_id"] == p2p_id
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_same_id_different_payload_conflicts(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        p2p_id = str(uuid.uuid4())
+        assert (await _p2p_post(client, token, p2p_id, "one")).status == 200
+        conflict = await _p2p_post(client, token, p2p_id, "two")
+        assert conflict.status == 409
+        messages = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        assert len(messages) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_expired_is_rejected_and_stored_nowhere(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        p2p_id = str(uuid.uuid4())
+        resp = await _p2p_post(client, token, p2p_id, "old", expires_in=-60)
+        assert resp.status == 410
+        assert (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"] == []
+        # a later (valid) post with the same id is new, proving nothing was cached
+        ok = await _p2p_post(client, token, p2p_id, "old")
+        assert (await ok.json())["duplicate"] is False
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_expiry_beyond_max_age_rejected(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_MAX_MESSAGE_AGE_SECONDS", "100")
+    monkeypatch.setenv("MESSAGE_TTL_DAYS", "7")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await _p2p_post(client, token, str(uuid.uuid4()), expires_in=500)
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_invalid_id_rejected(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        resp = await _p2p_post(client, token, "not-a-uuid")
+        assert resp.status == 400
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_ack_keeps_dedupe_entry(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        p2p_id = str(uuid.uuid4())
+        first = await (await _p2p_post(client, token, p2p_id, "keep")).json()
+        await client.post(f"/mailboxes/{token}/ack", json={"id": first["id"]})
+        assert (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"] == []
+        # late duplicate after the message was acked is still recognised
+        again = await (await _p2p_post(client, token, p2p_id, "keep")).json()
+        assert again["duplicate"] is True and again["id"] == first["id"]
+        assert (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"] == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_concurrent_identical_posts_create_one_message(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        p2p_id = str(uuid.uuid4())
+        responses = await asyncio.gather(_p2p_post(client, token, p2p_id), _p2p_post(client, token, p2p_id))
+        bodies = [await r.json() for r in responses]
+        assert sorted(b["duplicate"] for b in bodies) == [False, True]
+        assert bodies[0]["id"] == bodies[1]["id"]
+        messages = (await (await client.get(f"/mailboxes/{token}/messages")).json())["messages"]
+        assert len(messages) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_p2p_flag_required_for_dedupe(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        p2p_id = str(uuid.uuid4())
+        # normal notify that happens to carry a p2p_id but no p2p flag: no cache
+        normal = await client.post("/notify", headers={"Authorization": f"Bearer {token}"}, json={"message": "a", "p2p_id": p2p_id})
+        assert normal.status == 202
+        p2p = await _p2p_post(client, token, p2p_id, "a")
+        assert (await p2p.json())["duplicate"] is False
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_reports_p2p(monkeypatch):
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_DEDUPE_MAX_ENTRIES", "42")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        data = await (await client.get("/settings")).json()
+        assert data["p2p"]["enabled"] is True
+        assert data["p2p"]["max_entries"] == 42
+        assert data["p2p"]["dedupe_ttl_seconds"] > 0
+        assert data["p2p"]["max_message_age_seconds"] > 0
+    finally:
+        await client.close()
+
+
+def test_p2p_cache_persists_across_restart(tmp_path):
+    token = "00000000-0000-0000-0000-00000000000d"
+    expires = time.time() + 3600
+    store = MailboxStore(str(tmp_path), 30 * 86400, 7 * 86400, 128, 0, 16, 1000, 10)
+    status, page = store.p2p_enqueue(token, "p2p-1", {"message": "a"}, "hash", expires)
+    assert status == "new"
+    # a fresh store on the same DATA_DIR still remembers the id
+    restarted = MailboxStore(str(tmp_path), 30 * 86400, 7 * 86400, 128, 0, 16, 1000, 10)
+    status, message_id = restarted.p2p_enqueue(token, "p2p-1", {"message": "a"}, "hash", expires)
+    assert status == "duplicate" and message_id == page.id
+
+
+def test_p2p_cache_capacity_evicts_oldest():
+    token = "00000000-0000-0000-0000-00000000000e"
+    expires = time.time() + 3600
+    store = MailboxStore(None, 30 * 86400, 7 * 86400, 128, 0, 16, 10, 1)
+    assert store.p2p_enqueue(token, "id-1", {"message": "1"}, "h1", expires)[0] == "new"
+    # per-mailbox cap is 1: adding id-2 evicts id-1
+    assert store.p2p_enqueue(token, "id-2", {"message": "2"}, "h2", expires)[0] == "new"
+    # id-1 was evicted, so it is new again (and evicts id-2)
+    assert store.p2p_enqueue(token, "id-1", {"message": "1"}, "h1", expires)[0] == "new"
 
 
 def test_pager_plugin_syntax():

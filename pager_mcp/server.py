@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -56,6 +57,11 @@ def load_fcm_account(raw: str) -> dict[str, Any] | None:
 
 def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
+    p2p_enabled = os.getenv("P2P_DEDUPE_ENABLED", "").lower() in ("1", "true", "yes", "on")
+    p2p_dedupe_ttl = env_float("P2P_DEDUPE_TTL_SECONDS", 604800)
+    p2p_max_age = env_float("P2P_MAX_MESSAGE_AGE_SECONDS", 604800)
+    p2p_max_entries = int(os.getenv("P2P_DEDUPE_MAX_ENTRIES", "1000"))
+    p2p_max_per_mailbox = int(os.getenv("P2P_DEDUPE_MAX_PER_MAILBOX", "256"))
     store = MailboxStore(
         os.getenv("DATA_DIR") or None,
         env_float("MAILBOX_TTL_DAYS", 30),
@@ -63,6 +69,8 @@ def build_app() -> web.Application:
         int(os.getenv("MAX_MESSAGES_PER_MAILBOX", "128")),
         env_float("SUBSCRIPTION_TTL_DAYS", 30),
         int(os.getenv("MAX_SUBSCRIPTIONS_PER_MAILBOX", "16")),
+        p2p_max_entries,
+        p2p_max_per_mailbox,
     )
     cleanup_interval = env_float("CLEANUP_INTERVAL_SECONDS", 3600)
     warn_seconds = env_float("SUBSCRIPTION_WARN_DAYS", 3)
@@ -103,6 +111,13 @@ def build_app() -> web.Application:
         "subscriptions": {"enabled": True, "channels": sorted(push_channels), "ntfy_url": ntfy_url or None, "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
         "cleanup_interval_seconds": cleanup_interval,
         "webclient": {"ttl_seconds": webclient_ttl},
+        "p2p": {
+            "enabled": p2p_enabled,
+            "dedupe_ttl_seconds": p2p_dedupe_ttl,
+            "max_message_age_seconds": min(p2p_max_age, store.message_ttl) if store.message_ttl else p2p_max_age,
+            "max_entries": p2p_max_entries,
+            "max_per_mailbox": p2p_max_per_mailbox,
+        },
         "persistence": store.db is not None,
     }
 
@@ -181,26 +196,7 @@ def build_app() -> web.Application:
         if bucket is not None and not bucket:
             waiters.pop(token, None)
 
-    async def notify(request: web.Request) -> web.Response:
-        if request.content_length and request.content_length > max_bytes:
-            raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=request.content_length)
-        try:
-            raw = await request.read()
-            if len(raw) > max_bytes:
-                raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=len(raw))
-            payload = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise web.HTTPBadRequest(text="invalid JSON") from exc
-        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or payload.pop("uuid", "")
-        if not token:
-            raise web.HTTPUnauthorized(text="UUID is required")
-        try:
-            uuid.UUID(token)
-        except ValueError as exc:
-            raise web.HTTPUnauthorized(text="invalid UUID") from exc
-        page = store.enqueue(token, payload)
-        if page is None:
-            raise web.HTTPTooManyRequests(text="mailbox is full")
+    def fan_out(token: str, page: Any) -> None:
         data = page_data(page)
         # Wake blocked waiters, but leave the page in the queue. It is removed
         # only when a waiter acknowledges it, so a connection that dies between
@@ -227,6 +223,69 @@ def build_app() -> web.Application:
                 task = asyncio.create_task(push_trigger(session, token, subscription, data))
                 push_state["tasks"].add(task)
                 task.add_done_callback(push_state["tasks"].discard)
+
+    async def notify(request: web.Request) -> web.Response:
+        if request.content_length and request.content_length > max_bytes:
+            raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=request.content_length)
+        try:
+            raw = await request.read()
+            if len(raw) > max_bytes:
+                raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=len(raw))
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise web.HTTPBadRequest(text="invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="JSON object required")
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or payload.pop("uuid", "")
+        if not token:
+            raise web.HTTPUnauthorized(text="UUID is required")
+        try:
+            uuid.UUID(token)
+        except ValueError as exc:
+            raise web.HTTPUnauthorized(text="invalid UUID") from exc
+
+        if payload.get("p2p"):
+            # Opt-in idempotent delivery for P2P store-and-forward clients: several
+            # peers may post the same envelope. Duplicates are recognised per
+            # (mailbox, p2p_id) and never create a second message or notification.
+            if not p2p_enabled:
+                raise web.HTTPForbidden(text="p2p dedupe is not enabled")
+            p2p_id = payload.get("p2p_id")
+            try:
+                uuid.UUID(str(p2p_id))
+            except (ValueError, TypeError) as exc:
+                raise web.HTTPBadRequest(text="p2p_id must be a UUID") from exc
+            expires_raw = payload.get("p2p_expires_at")
+            if isinstance(expires_raw, bool) or not isinstance(expires_raw, (int, float)):
+                raise web.HTTPBadRequest(text="p2p_expires_at is required (unix seconds)")
+            now = time.time()
+            message_expires = float(expires_raw)
+            if now >= message_expires:
+                raise web.HTTPGone(text="p2p message expired")
+            max_age = min(p2p_max_age, store.message_ttl) if store.message_ttl else p2p_max_age
+            if max_age and message_expires - now > max_age:
+                raise web.HTTPBadRequest(text="p2p_expires_at exceeds the maximum message age")
+            core = {key: value for key, value in payload.items() if key not in ("p2p", "p2p_id", "p2p_created_at", "p2p_expires_at", "p2p_payload_sha256")}
+            digest = hashlib.sha256(json.dumps(core, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            cache_expires = message_expires
+            if p2p_dedupe_ttl:
+                cache_expires = min(cache_expires, now + p2p_dedupe_ttl)
+            if store.message_ttl:
+                cache_expires = min(cache_expires, now + store.message_ttl)
+            status, result = store.p2p_enqueue(token, str(p2p_id), payload, digest, cache_expires)
+            if status == "duplicate":
+                return web.json_response({"id": result, "duplicate": True})
+            if status == "conflict":
+                raise web.HTTPConflict(text="p2p_id already used with a different payload")
+            if status == "full":
+                raise web.HTTPTooManyRequests(text="mailbox is full")
+            fan_out(token, result)
+            return web.json_response({"id": result.id, "duplicate": False})
+
+        page = store.enqueue(token, payload)
+        if page is None:
+            raise web.HTTPTooManyRequests(text="mailbox is full")
+        fan_out(token, page)
         return web.json_response({"accepted": True, "id": page.id}, status=202)
 
     async def pending(request: web.Request) -> web.Response:
