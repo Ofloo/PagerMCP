@@ -62,6 +62,16 @@ def load_fcm_account(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def _mailbox_hash_hex(mailbox: str) -> str:
+    """Rotating, non-identifying trigger identifier: sha256("<mailbox>:<unix-hour>").
+
+    Hourly rotation keeps one hour's pushes unlinkable from the next for any
+    observer of the push channel, while a client that knows its mailbox UUID can
+    recompute the hash locally (aligning clocks via /settings' server_time).
+    """
+    return hashlib.sha256(f"{mailbox}:{int(time.time() // 3600)}".encode()).hexdigest()
+
+
 def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
     p2p_enabled = os.getenv("P2P_DEDUPE_ENABLED", "").lower() in ("1", "true", "yes", "on")
@@ -135,7 +145,9 @@ def build_app() -> web.Application:
         return web.json_response({"version": __version__, "build": __build__, "hostname": os.getenv("HOSTNAME", "")})
 
     async def settings_endpoint(_: web.Request) -> web.Response:
-        return web.json_response(settings, headers={"Cache-Control": "max-age=60"})
+        # server_time must be fresh per request: clients use it to align their
+        # clock with the server's before computing rotating mailbox hashes.
+        return web.json_response({**settings, "server_time": int(time.time())}, headers={"Cache-Control": "no-cache"})
 
     async def root(_: web.Request) -> web.Response:
         readme_path = Path(base_dir) / "README.md"
@@ -473,11 +485,11 @@ def build_app() -> web.Application:
             return None
         message: dict[str, Any] = {"token": subscription.endpoint, "android": {"priority": "high"}}
         if kind == "page":
-            message["data"] = {"type": "page", "mailbox": mailbox, "id": str(data.get("id", ""))}
+            message["data"] = {"type": "page", "mailbox": mailbox, "mailbox_hash": _mailbox_hash_hex(mailbox), "id": str(data.get("id", ""))}
             if fcm_include_payload:
                 message["notification"] = {"title": "PagerMCP", "body": str(data.get("message", "New page"))}
         else:
-            message["data"] = {"type": "warning", "reason": "subscription-expiring"}
+            message["data"] = {"type": "warning", "reason": "subscription-expiring", "mailbox_hash": _mailbox_hash_hex(mailbox)}
         try:
             async with session.post(f"{fcm_base}/v1/projects/{project}/messages:send", json={"message": message}, headers={"Authorization": f"Bearer {access}"}, timeout=ClientTimeout(total=10)) as response:
                 return response.status
@@ -490,10 +502,10 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "page", token, data)
             elif subscription.channel == "ntfy":
-                async with session.post(subscription.endpoint, data=f"New page in mailbox {token}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
+                async with session.post(subscription.endpoint, data=f"New page in mailbox {token}\nmailbox_hash: {_mailbox_hash_hex(token)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
                     status = response.status
             else:
-                body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
+                body = {"type": "page", "mailbox": token, "mailbox_hash": _mailbox_hash_hex(token), "id": data.get("id"), "created_at": data.get("created_at")}
                 async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
                     status = response.status
             remove_on = (400, 404, 410) if subscription.channel == "fcm" else (404, 410)
@@ -509,10 +521,10 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "warning", subscription.mailbox, {})
             elif subscription.channel == "ntfy":
-                async with session.post(subscription.endpoint, data=b"PagerMCP: push expires soon", headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
+                async with session.post(subscription.endpoint, data=f"PagerMCP: push expires soon\nmailbox_hash: {_mailbox_hash_hex(subscription.mailbox)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
                     status = response.status
             else:
-                body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
+                body = {"type": "warning", "mailbox": subscription.mailbox, "mailbox_hash": _mailbox_hash_hex(subscription.mailbox), "reason": "subscription-expiring", "expires": subscription.expires}
                 async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
                     status = response.status
             if status is not None and status in ((400, 404, 410) if subscription.channel == "fcm" else (404, 410)):

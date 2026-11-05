@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 import socket
@@ -198,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.1"
+        assert data["version"] == "0.12.2"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -515,6 +516,12 @@ async def test_notify_sends_data_only_trigger_to_subscription(monkeypatch):
         await client.post("/notify", json={"uuid": token, "message": "boom", "secret": "classified"})
         await asyncio.sleep(0.4)
         assert received and received[0]["type"] == "page" and received[0]["mailbox"] == token
+        # rotating hash alongside the raw mailbox (sha256("<uuid>:<unix-hour>"),
+        # tolerant of an hour tick mid-test)
+        hour = int(time.time() // 3600)
+        candidates = {hashlib.sha256(f"{token}:{h}".encode()).hexdigest() for h in (hour, hour - 1)}
+        assert received[0]["mailbox_hash"] in candidates
+        assert received[0]["mailbox_hash"] != token
         # data-only: the trigger never carries message content
         assert "message" not in received[0] and "secret" not in received[0]
         assert (await client.delete(f"/mailboxes/{token}/subscriptions/{subscription['id']}")).status == 200
@@ -583,6 +590,12 @@ async def test_subscription_expiry_warning_reaches_endpoint(monkeypatch):
             if any(item.get("type") == "warning" for item in received):
                 break
         assert any(item.get("type") == "warning" and item.get("reason") == "subscription-expiring" for item in received)
+        # warnings identify the mailbox both raw (compat) and hashed (rotating)
+        warning = next(item for item in received if item.get("type") == "warning")
+        assert warning["mailbox"] == token
+        hour = int(time.time() // 3600)
+        candidates = {hashlib.sha256(f"{token}:{h}".encode()).hexdigest() for h in (hour, hour - 1)}
+        assert warning["mailbox_hash"] in candidates
     finally:
         await client.close()
         await receiver.close()
@@ -615,6 +628,9 @@ async def test_settings_endpoint_exposes_client_relevant_config(monkeypatch):
         assert data["subscriptions"]["warn_seconds"] == 2 * 86400
         assert "unifiedpush" in data["subscriptions"]["channels"]
         assert data["cleanup_interval_seconds"] == 1800
+        # fresh server time for client clock-offset alignment (rotating hashes)
+        assert isinstance(data["server_time"], int)
+        assert abs(data["server_time"] - int(time.time())) < 60
         # never leak secrets
         assert "secret" not in str(data).lower()
     finally:
