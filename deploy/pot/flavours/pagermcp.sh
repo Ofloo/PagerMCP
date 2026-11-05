@@ -3,8 +3,8 @@
 # Same application and environment configuration as the Docker/Bastille deployments.
 set -eu
 
-PAGER_VERSION="0.12.4"
-PAGER_BUILD="80"
+PAGER_VERSION="0.12.5"
+PAGER_BUILD="84"
 PAGER_PORT="8080"
 
 if [ -w /etc/pkg/FreeBSD.conf ]; then
