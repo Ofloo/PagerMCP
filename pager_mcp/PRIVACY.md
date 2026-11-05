@@ -37,9 +37,14 @@ iedereen met toegang tot de opslag — kan de berichten in principe lezen.
 
 Registreer je een push-endpoint (subscription), dan stuurt de server bij een
 nieuw bericht een **lege trigger** (`{"type":"page","mailbox":...}`, zonder
-inhoud) naar dat endpoint. Dat endpoint is meestal van een derde partij (een
-UnifiedPush-distributor of een browser-push-service), die dus wél ziet dát er
-iets voor jouw toestel is, maar **niet wat**. Je haalt de inhoud daarna zelf op
+bericht-inhoud) naar dat endpoint. Let op: de trigger bevat wél je
+**mailbox-UUID** — de pagerapp gebruikt dat veld om te weten welke mailbox hij
+moet ophalen. Het endpoint is meestal van een derde partij (Google FCM, een
+ntfy-server of een UnifiedPush-distributor), die dus ziet **welke mailbox-UUID**
+een page kreeg, maar **niet wat** erin staat. Dat is een bewuste afweging: wie
+privacy tegenover die partij wil, gebruikt SSE (geen trigger, geen derde
+partij). Gepland (vereist een pagerapp-update): de UUID vervangen door een
+roterende `sha256(uuid || unix-uur)`-hash. Je haalt de inhoud daarna zelf op
 via SSE of `/wait`.
 
 Subscriptions hebben een **lease** (standaard 30 dagen): je moet ze verlengen,
