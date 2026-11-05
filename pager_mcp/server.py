@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ import uuid
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -72,6 +74,73 @@ def _mailbox_hash_hex(mailbox: str) -> str:
     return hashlib.sha256(f"{mailbox}:{int(time.time() // 3600)}".encode()).hexdigest()
 
 
+def _parse_allowlist(raw: str) -> tuple[set[str], list[Any]]:
+    """PUSH_ENDPOINT_ALLOWLIST: comma-separated hostnames, IPs or CIDR networks.
+
+    A hostname entry exempts that exact host; an IP/CIDR entry exempts endpoints
+    whose resolved address falls inside it. Empty by default: nothing is exempt.
+    """
+    hosts: set[str] = set()
+    networks: list[Any] = []
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            hosts.add(item)
+    return hosts, networks
+
+
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _non_public(ip: Any) -> bool:
+    # IPv4-mapped IPv6 (::ffff:127.0.0.1) is unwrapped so the check behaves the
+    # same on every Python version; CGNAT (100.64.0.0/10, o.a. Tailscale) is not
+    # covered by is_private and is blocked explicitly, like every other range
+    # that is not publicly routable (10/8, 172.16/12, 192.168/16, 127/8,
+    # 169.254/16, 192.0.2/24, 198.51.100/24, 203.0.113/24, 198.18/15, ...).
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip in _CGNAT:
+        return True
+    return ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+
+
+async def _endpoint_error(url: str, allow_hosts: set[str], allow_nets: list[Any]) -> str | None:
+    """Guard generic push endpoints against SSRF into internal networks.
+
+    Only public addresses are accepted, unless the host/address is explicitly on
+    the operator allowlist. Re-checked at every push (DNS may have changed) and
+    redirects are never followed.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if not host:
+        return "endpoint has no host"
+    if host in allow_hosts:
+        return None
+    try:
+        ip = ipaddress.ip_address(host)
+        addresses = [ip]
+    except ValueError:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(host, port)
+        except OSError:
+            return "endpoint hostname does not resolve"
+        addresses = [ipaddress.ip_address(info[4][0]) for info in infos]
+    for address in addresses:
+        if any(address in net for net in allow_nets):
+            continue
+        if _non_public(address):
+            return "endpoint resolves to a non-public address (use PUSH_ENDPOINT_ALLOWLIST to exempt a trusted host/network)"
+    return None
+
+
 def build_app() -> web.Application:
     max_bytes = int(os.getenv("MAX_MESSAGE_BYTES", "65536"))
     p2p_enabled = os.getenv("P2P_DEDUPE_ENABLED", "").lower() in ("1", "true", "yes", "on")
@@ -99,6 +168,9 @@ def build_app() -> web.Application:
     # ntfy server is configured; it publishes a plain-text wake-up to a topic.
     ntfy_url = os.getenv("NTFY_URL", "").rstrip("/")
     ntfy_token = os.getenv("NTFY_TOKEN", "")
+    # SSRF guard for generic push endpoints: non-public addresses are refused
+    # unless the operator explicitly exempts a host/network (default: none).
+    push_allow_hosts, push_allow_nets = _parse_allowlist(os.getenv("PUSH_ENDPOINT_ALLOWLIST", ""))
     # FCM (Firebase Cloud Messaging) HTTP v1 via a service-account, opt-in per
     # mailbox: a client registers {\"channel\":\"fcm\",\"token\":\"<device token>\"}.
     fcm_project = os.getenv("FCM_PROJECT_ID", "")
@@ -491,7 +563,7 @@ def build_app() -> web.Application:
         else:
             message["data"] = {"type": "warning", "reason": "subscription-expiring", "mailbox_hash": _mailbox_hash_hex(mailbox)}
         try:
-            async with session.post(f"{fcm_base}/v1/projects/{project}/messages:send", json={"message": message}, headers={"Authorization": f"Bearer {access}"}, timeout=ClientTimeout(total=10)) as response:
+            async with session.post(f"{fcm_base}/v1/projects/{project}/messages:send", json={"message": message}, headers={"Authorization": f"Bearer {access}"}, timeout=ClientTimeout(total=10), allow_redirects=False) as response:
                 return response.status
         except Exception:
             return None
@@ -502,11 +574,15 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "page", token, data)
             elif subscription.channel == "ntfy":
-                async with session.post(subscription.endpoint, data=f"New page in mailbox {token}\nmailbox_hash: {_mailbox_hash_hex(token)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
+                async with session.post(subscription.endpoint, data=f"New page in mailbox {token}\nmailbox_hash: {_mailbox_hash_hex(token)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             else:
+                # Re-validate at push time (DNS answers can change since registration).
+                error = await _endpoint_error(subscription.endpoint, push_allow_hosts, push_allow_nets)
+                if error:
+                    return
                 body = {"type": "page", "mailbox": token, "mailbox_hash": _mailbox_hash_hex(token), "id": data.get("id"), "created_at": data.get("created_at")}
-                async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
+                async with session.post(subscription.endpoint, json=body, timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             remove_on = (400, 404, 410) if subscription.channel == "fcm" else (404, 410)
             if status is not None and status in remove_on:
@@ -521,11 +597,14 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "warning", subscription.mailbox, {})
             elif subscription.channel == "ntfy":
-                async with session.post(subscription.endpoint, data=f"PagerMCP: push expires soon\nmailbox_hash: {_mailbox_hash_hex(subscription.mailbox)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout) as response:
+                async with session.post(subscription.endpoint, data=f"PagerMCP: push expires soon\nmailbox_hash: {_mailbox_hash_hex(subscription.mailbox)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             else:
+                error = await _endpoint_error(subscription.endpoint, push_allow_hosts, push_allow_nets)
+                if error:
+                    return
                 body = {"type": "warning", "mailbox": subscription.mailbox, "mailbox_hash": _mailbox_hash_hex(subscription.mailbox), "reason": "subscription-expiring", "expires": subscription.expires}
-                async with session.post(subscription.endpoint, json=body, timeout=timeout) as response:
+                async with session.post(subscription.endpoint, json=body, timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             if status is not None and status in ((400, 404, 410) if subscription.channel == "fcm" else (404, 410)):
                 store.remove_subscription(subscription.mailbox, subscription.id)
@@ -578,6 +657,10 @@ def build_app() -> web.Application:
                 subscription = store.renew_subscription(token, str(existing))
             else:
                 endpoint, keys = resolve_target(channel, body)
+                if channel not in ("ntfy", "fcm"):
+                    error = await _endpoint_error(endpoint, push_allow_hosts, push_allow_nets)
+                    if error:
+                        raise web.HTTPBadRequest(text=error)
                 subscription = store.update_subscription(token, str(existing), endpoint, keys)
             if subscription is None:
                 raise web.HTTPNotFound(text="subscription not found")
@@ -586,6 +669,10 @@ def build_app() -> web.Application:
         if not channel:
             raise web.HTTPBadRequest(text="channel is required")
         endpoint, keys = resolve_target(channel, body)
+        if channel not in ("ntfy", "fcm"):
+            error = await _endpoint_error(endpoint, push_allow_hosts, push_allow_nets)
+            if error:
+                raise web.HTTPBadRequest(text=error)
         subscription = store.add_subscription(token, channel, endpoint, keys)
         if subscription is None:
             raise web.HTTPTooManyRequests(text="too many subscriptions for this mailbox")

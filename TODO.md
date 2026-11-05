@@ -19,10 +19,17 @@ bepalen welke mailbox hij op moet halen.
   Roteerbaar: elke uurwissel een nieuwe, pseudorandom waarde — correlatie over
   uren door breekt (binnen het uur blijft het identiek, dat is de trade-off).
   Omgrekeerd brute-forcen is onmogelijk (128-bit UUID is al random).
-- **Clock-skew / uurgrenzen:** de app dekt uurwissels met een ±2 minuten venster
-  (hash-kandidaten van het vorige en volgende uur ook proberen, of de server
-  stuurt het gebruikte uur expliciet mee). Worst-case: de app kijkt voor een
-  bericht dat er niet is — één loze fetch, onschuldig want at-least-once.
+- **Beslissing: client handelt de uur-berekening zelf af** — de server stuurt
+  géén `h`-veld mee in de trigger. De client berekent `h` met zijn eigen klok.
+- **Klok-offset:** `GET /settings` gaat de huidige server-Unix-tijd tonen
+  (bijv. `"server_time": <unix>`), zodat de client `offset = server_time -
+  local_now` kan bepalen en `h = floor((local_now + offset)/3600)` uitrekent.
+  Settings, niet status: settings is de discovery-endpoint die de client al
+  raadpleegt. Toevoegen valt onder de migratie-release.
+- **Clock-skew / uurgrenzen:** extra veiligheid is een ±2 minuten venster
+  (kandidaat van het voorgaande uur ook proberen als de minuut < 2 is).
+  Worst-case: de app kijkt voor een bericht dat er niet is — één loze fetch,
+  onschuldig want at-least-once.
 - **Levering mist nooit data** ongeacht de trigger: berichten blijven in de
   queue tot `POST /ack`; SSE-reconnect replay't de backlog; een gemiste of
   gecollapse'e wake-up is hoogstens een vertraagde wekking.

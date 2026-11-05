@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.2"
+        assert data["version"] == "0.12.3"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -490,6 +490,7 @@ def test_subscription_cap_and_sqlite(tmp_path):
 @pytest.mark.asyncio
 async def test_notify_sends_data_only_trigger_to_subscription(monkeypatch):
     monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "127.0.0.1")
     received = []
 
     async def hook(request):
@@ -565,6 +566,7 @@ def test_subscription_warning_before_expiry():
 
 @pytest.mark.asyncio
 async def test_subscription_expiry_warning_reaches_endpoint(monkeypatch):
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "127.0.0.1")
     monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "1")
     monkeypatch.setenv("SUBSCRIPTION_TTL_DAYS", "0.01")
     monkeypatch.setenv("SUBSCRIPTION_WARN_DAYS", "1")
@@ -639,6 +641,7 @@ async def test_settings_endpoint_exposes_client_relevant_config(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mailbox_status_reports_push_state(monkeypatch):
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "e.test")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1197,6 +1200,93 @@ def test_p2p_cache_capacity_evicts_oldest():
     assert store.p2p_enqueue(token, "id-2", {"message": "2"}, "h2", expires)[0] == "new"
     # id-1 was evicted, so it is new again (and evicts id-2)
     assert store.p2p_enqueue(token, "id-1", {"message": "1"}, "h1", expires)[0] == "new"
+
+
+@pytest.mark.asyncio
+async def test_subscription_blocks_non_public_endpoints_by_default():
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        for endpoint in [
+            "http://127.0.0.1:9/hook",
+            "http://localhost:9/hook",
+            "http://169.254.169.254/latest/meta-data",
+            "http://192.168.1.10/hook",
+            "http://10.0.0.5/hook",
+            "http://172.16.0.1/hook",
+            "http://[::1]:9/hook",
+            "http://0.0.0.0/hook",
+            "http://100.64.0.1/hook",
+            "http://100.127.255.255/hook",
+            "http://192.0.2.1/hook",
+            "http://198.51.100.1/hook",
+            "http://203.0.113.1/hook",
+            "http://198.18.0.1/hook",
+            "http://[::ffff:127.0.0.1]/hook",
+            "http://224.0.0.1/hook",
+            "http://255.255.255.255/hook",
+            "http://[ff02::1]/hook",
+        ]:
+            resp = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+            assert resp.status == 400, endpoint
+        # public addresses are fine without any DNS lookup (100.128.x is outside CGNAT)
+        for endpoint in ["https://93.184.215.14/hook", "http://100.128.0.1/hook"]:
+            ok = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+            assert ok.status == 201, endpoint
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_subscription_allowlist_exempts_host_and_cidr(monkeypatch):
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "up.internal.example, 10.13.40.0/24")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        allowed_host = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": "https://up.internal.example/hook"})
+        assert allowed_host.status == 201
+        allowed_net = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": "http://10.13.40.50/hook"})
+        assert allowed_net.status == 201
+        other_private = await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": "http://10.0.0.5/hook"})
+        assert other_private.status == 400
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_push_trigger_never_follows_redirects(monkeypatch):
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "127.0.0.1")
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    followed = []
+
+    async def redirect_hook(request):
+        raise web.HTTPFound(location=f"http://127.0.0.1:{request.url.port}/landed")
+
+    async def landed(request):
+        followed.append(await request.json())
+        return web.json_response({"ok": True})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/hook", redirect_hook), web.post("/landed", landed)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        endpoint = f"http://127.0.0.1:{receiver.server.port}/hook"
+        await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+        await client.post("/notify", json={"uuid": token, "message": "redirect test"})
+        await asyncio.sleep(0.5)
+        assert followed == []
+    finally:
+        await client.close()
+        await receiver.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):
