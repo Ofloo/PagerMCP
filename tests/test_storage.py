@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.5"
+        assert data["version"] == "0.12.6"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1368,6 +1368,55 @@ def test_drop_privileges_noop_when_unprivileged(monkeypatch):
     monkeypatch.setattr(os, "setuid", boom)
     monkeypatch.setattr(os, "setgid", boom)
     srv.drop_privileges()
+
+
+def test_client_parse_message_skips_malformed_lines():
+    from pager_mcp.client import parse_message
+
+    assert parse_message('{"id": 1, "method": "initialize"}') == {"id": 1, "method": "initialize"}
+    assert parse_message("not json at all") is None
+    assert parse_message('{"broken": ') is None
+    assert parse_message("[1, 2, 3]") is None
+    assert parse_message("42") is None
+
+
+def test_session_file_ownership_does_not_follow_symlinks(tmp_path, monkeypatch):
+    if os.geteuid() != 0:
+        pytest.skip("chown to another uid requires root")
+    from pager_mcp.client import fix_session_file_ownership
+
+    target = tmp_path / "target"
+    target.write_text("x")
+    link = tmp_path / ".pager_session"
+    link.symlink_to(target)
+    monkeypatch.setenv("PAGER_UID", "65534")
+    monkeypatch.setenv("PAGER_GID", "65534")
+    fix_session_file_ownership(link)
+    assert target.stat().st_uid != 65534  # the target is untouched
+    assert os.lstat(link).st_uid == 65534  # only the link itself changed
+
+
+def test_pager_sh_json_escape_handles_control_chars():
+    script = 'eval "$(sed -n \'/^json_escape()/,/^}/p\' sample/pager.sh)"; json_escape "$1"'
+    arg = 'a\tb\rc\x01d"e\\f'
+    out = subprocess.run(["sh", "-c", script, "sh", arg], capture_output=True, text=True)
+    assert out.returncode == 0
+    result = out.stdout
+    assert "\t" not in result and "\r" not in result and "\x01" not in result
+    assert "a bcd" in result
+    assert '\\"' in result
+
+
+def test_pager_sh_session_file_must_contain_uuid(tmp_path):
+    good = tmp_path / "good"
+    good.write_text("550e8400-e29b-41d4-a716-446655440000\n")
+    bad = tmp_path / "bad"
+    bad.write_text("not-a-uuid\n")
+    extract = 'eval "$(sed -n \'/^UUID_PATTERN=/p;/^resolve_uuid()/,/^}/p\' sample/pager.sh)"; SESSION="$1"; resolve_uuid'
+    ok = subprocess.run(["sh", "-c", extract, "sh", str(good)])
+    assert ok.returncode == 0
+    bad_result = subprocess.run(["sh", "-c", extract, "sh", str(bad)])
+    assert bad_result.returncode != 0
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

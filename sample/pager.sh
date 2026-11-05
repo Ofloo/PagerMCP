@@ -56,7 +56,9 @@ SUCCESS_STATUS="success"; FAIL_STATUS="failed"; SUCCESS_CMD=""
 LOG=""; INTERVAL=10; TAIL=10; VERBOSE=0; NOTIFY=0; DRY_RUN=""
 
 json_escape() {
-    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
+    # JSON allows no raw control characters: tab becomes a space, CR and other
+    # control bytes are stripped, newlines become spaces (as before).
+    printf '%s' "$1" | tr -d '\000-\010\013\014\015\016-\037' | tr '\011' ' ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | tr '\n' ' '
 }
 
 build_payload() {
@@ -106,6 +108,9 @@ resolve_uuid() {
         return 1
     fi
     [ -n "$UUID" ] || return 1
+    # Whatever the source (flag, --session file or .pager_session), the result
+    # must actually be a UUID; a corrupt session file is an error, not a token.
+    echo "$UUID" | grep -Eq "$UUID_PATTERN" || return 1
     return 0
 }
 
@@ -210,6 +215,8 @@ fi
 
 collect_logs() {
     if [ -n "$SUCCESS_CMD" ]; then
+        # NOTE: --success-cmd is intentionally evaluated by the shell. Only pass
+        # a command you wrote yourself (operator-chosen), never external data.
         eval "$SUCCESS_CMD" 2>&1 | tr "\n" " "
     elif [ "$TAIL" -gt 0 ] && [ -n "$LOG" ] && [ "$LOG" != "/dev/null" ] && [ -f "$LOG" ]; then
         tail -n "$TAIL" "$LOG" 2>/dev/null | tr "\n" " "

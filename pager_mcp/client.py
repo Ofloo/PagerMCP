@@ -32,7 +32,9 @@ def session_owner() -> tuple[int, int]:
 def fix_session_file_ownership(path: Path) -> None:
     uid, gid = session_owner()
     try:
-        os.chown(path, uid, gid)
+        # Never follow symlinks: a hostile local link must not redirect the
+        # chown to an arbitrary target file.
+        os.chown(path, uid, gid, follow_symlinks=False)
     except PermissionError:
         # A non-root container cannot chown. That is only fatal when the file is
         # also unusable; if we can read and write it, ownership is left as is.
@@ -107,12 +109,25 @@ def check_version() -> None:
         print(f"PagerMCP version mismatch: client {__version__} build {__build__}, server {remote.get('version')} build {remote.get('build')}", file=sys.stderr)
 
 
+def parse_message(line: str) -> dict | None:
+    """Parse one stdio JSON-RPC line; a malformed or non-object line is skipped
+    instead of killing the client."""
+    try:
+        message = json.loads(line)
+    except json.JSONDecodeError as exc:
+        print(f"PagerMCP client: skipping malformed input line: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(message, dict):
+        return None
+    return message
+
+
 def main() -> None:
     check_version()
     token = get_token()
     for line in sys.stdin:
-        message = json.loads(line)
-        if "id" not in message:
+        message = parse_message(line)
+        if message is None or "id" not in message:
             continue
         method = message.get("method")
         if method == "initialize":
