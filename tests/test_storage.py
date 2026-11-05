@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.8"
+        assert data["version"] == "0.13.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -564,7 +564,8 @@ async def test_notify_sends_data_only_trigger_to_subscription(monkeypatch):
         assert "endpoint" not in listed["subscriptions"][0]
         await client.post("/notify", json={"uuid": token, "message": "boom", "secret": "classified"})
         await asyncio.sleep(0.4)
-        assert received and received[0]["type"] == "page" and received[0]["mailbox"] == token
+        assert received and received[0]["type"] == "page"
+        assert "mailbox" not in received[0]  # hash-only: no raw UUID on the wire
         # rotating hash alongside the raw mailbox (sha256("<uuid>:<unix-hour>"),
         # tolerant of an hour tick mid-test)
         hour = int(time.time() // 3600)
@@ -642,7 +643,7 @@ async def test_subscription_expiry_warning_reaches_endpoint(monkeypatch):
         assert any(item.get("type") == "warning" and item.get("reason") == "subscription-expiring" for item in received)
         # warnings identify the mailbox both raw (compat) and hashed (rotating)
         warning = next(item for item in received if item.get("type") == "warning")
-        assert warning["mailbox"] == token
+        assert "mailbox" not in warning
         hour = int(time.time() // 3600)
         candidates = {hashlib.sha256(f"{token}:{h}".encode()).hexdigest() for h in (hour, hour - 1)}
         assert warning["mailbox_hash"] in candidates
@@ -743,7 +744,9 @@ async def test_ntfy_channel_publishes_content_free_wakeup(monkeypatch):
         await asyncio.sleep(0.4)
         assert received and received[0]["topic"] == "pager-test"
         assert received[0]["title"] == "PagerMCP"
-        assert token in received[0]["body"]
+        # hash-only: the body carries the rotating hash, never the UUID
+        assert token not in received[0]["body"]
+        assert "mailbox_hash:" in received[0]["body"]
         # data-only: the wake-up never carries the message content
         assert "secret-content" not in received[0]["body"]
     finally:
@@ -818,7 +821,9 @@ async def test_fcm_channel_sends_data_only(monkeypatch, tmp_path):
         message = sent[0]["message"]
         assert message["token"] == "device-token-1234567890"
         assert message["android"]["priority"] == "high"
-        assert message["data"]["type"] == "page" and message["data"]["mailbox"] == token
+        assert message["data"]["type"] == "page"
+        assert "mailbox" not in message["data"]
+        assert message["data"]["mailbox_hash"]
         # data-only by default: the wake-up never carries the message content
         assert "secret-content" not in json.dumps(sent[0])
     finally:
@@ -1049,6 +1054,7 @@ async def _p2p_post(client, token, p2p_id, message="m", expires_in=3600.0):
 @pytest.mark.asyncio
 async def test_p2p_disabled_rejects(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "false")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1064,6 +1070,7 @@ async def test_p2p_disabled_rejects(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_repeated_post_is_duplicate(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1089,6 +1096,7 @@ async def test_p2p_repeated_post_is_duplicate(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_same_id_different_payload_conflicts(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1107,6 +1115,7 @@ async def test_p2p_same_id_different_payload_conflicts(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_expired_is_rejected_and_stored_nowhere(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1126,6 +1135,7 @@ async def test_p2p_expired_is_rejected_and_stored_nowhere(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_expiry_beyond_max_age_rejected(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     monkeypatch.setenv("P2P_MAX_MESSAGE_AGE_SECONDS", "100")
     monkeypatch.setenv("MESSAGE_TTL_DAYS", "7")
     app = build_app()
@@ -1142,6 +1152,7 @@ async def test_p2p_expiry_beyond_max_age_rejected(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_invalid_id_rejected(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1156,6 +1167,7 @@ async def test_p2p_invalid_id_rejected(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_ack_keeps_dedupe_entry(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1176,6 +1188,7 @@ async def test_p2p_ack_keeps_dedupe_entry(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_concurrent_identical_posts_create_one_message(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1195,6 +1208,7 @@ async def test_p2p_concurrent_identical_posts_create_one_message(monkeypatch):
 @pytest.mark.asyncio
 async def test_p2p_flag_required_for_dedupe(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     app = build_app()
     client = TestClient(TestServer(app))
     await client.start_server()
@@ -1213,6 +1227,7 @@ async def test_p2p_flag_required_for_dedupe(monkeypatch):
 @pytest.mark.asyncio
 async def test_settings_reports_p2p(monkeypatch):
     monkeypatch.setenv("P2P_DEDUPE_ENABLED", "true")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
     monkeypatch.setenv("P2P_DEDUPE_MAX_ENTRIES", "42")
     app = build_app()
     client = TestClient(TestServer(app))
@@ -1534,6 +1549,140 @@ async def test_mailbox_hash_custom_period_and_settings(monkeypatch):
     finally:
         await client.close()
         await receiver.close()
+
+
+import asyncio
+import hashlib
+import json
+import os
+import shutil
+import socket
+import subprocess
+import time
+import uuid
+from pathlib import Path
+
+import pytest
+
+GPG_AVAILABLE = shutil.which("gpg") is not None
+requires_gpg = pytest.mark.skipif(not GPG_AVAILABLE, reason="gpg is not installed")
+
+
+def gpg_encrypt(armored_public_key: str, plaintext: str, home: Path) -> str:
+    home.mkdir(exist_ok=True)
+    home.chmod(0o700)
+    subprocess.run(["gpg", "--homedir", str(home), "--batch", "--import"], input=armored_public_key.encode(), capture_output=True, check=True)
+    result = subprocess.run(
+        ["gpg", "--homedir", str(home), "--batch", "--yes", "--armor", "--encrypt", "--trust-model", "always", "--recipient", "PagerMCP"],
+        input=plaintext.encode(),
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.decode()
+
+
+@requires_gpg
+@pytest.mark.asyncio
+async def test_p2p_gpg_settings_and_encrypted_uuid_flow(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "1")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        settings = await (await client.get("/settings")).json()
+        p2p = settings["p2p"]
+        assert p2p["gpg_enabled"] is True
+        assert "BEGIN PGP PUBLIC KEY BLOCK" in p2p["public_key"]
+        assert p2p["key_id"]
+
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        armored = gpg_encrypt(p2p["public_key"], token, tmp_path / "client-gnupg")
+        # the wire format is ciphertext, never the UUID itself
+        assert armored != token and token not in armored
+        import re as _re
+        assert not _re.match(r"^[0-9a-f-]{36}$", armored.strip())
+
+        expires = int(time.time()) + 3600
+        p2p_id = str(uuid.uuid4())
+        first = await client.post("/notify", json={"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": expires, "mailbox_encrypted": armored, "message": "secret"})
+        assert first.status == 200
+        assert (await first.json())["duplicate"] is False
+        # the server decrypted and routed to the right mailbox
+        messages = await (await client.get(f"/mailboxes/{token}/messages")).json()
+        assert len(messages["messages"]) == 1
+        # dedupe still works on the decrypted mailbox
+        second = await client.post("/notify", json={"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": expires, "mailbox_encrypted": armored, "message": "secret"})
+        assert (await second.json())["duplicate"] is True
+    finally:
+        await client.close()
+
+
+@requires_gpg
+@pytest.mark.asyncio
+async def test_p2p_plain_uuid_rejected_and_bad_ciphertext_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "1")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        plain = await client.post("/notify", json={"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "uuid": token, "message": "x"})
+        assert plain.status == 400
+        bad = await client.post("/notify", json={"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "mailbox_encrypted": "not-a-gpg-message"})
+        assert bad.status == 400
+        missing = await client.post("/notify", json={"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "message": "x"})
+        assert missing.status == 400
+    finally:
+        await client.close()
+
+
+@requires_gpg
+@pytest.mark.asyncio
+async def test_p2p_plain_uuid_allowed_when_gpg_disabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "1")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        settings = await (await client.get("/settings")).json()
+        assert settings["p2p"]["gpg_enabled"] is False
+        assert settings["p2p"]["public_key"] is None
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        response = await client.post("/notify", json={"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "uuid": token, "message": "x"})
+        assert response.status == 200
+    finally:
+        await client.close()
+
+
+@requires_gpg
+def test_gpg_key_renews_near_expiry_and_old_key_still_decrypts(tmp_path):
+    from pager_mcp.gpgkeys import GpgKeyring
+
+    home = tmp_path / "gnupg"
+    home.mkdir()
+    home.chmod(0o700)
+    subprocess.run(
+        ["gpg", "--homedir", str(home), "--batch", "--yes", "--gen-key"],
+        input=b"%no-protection\nKey-Type: RSA\nKey-Length: 2048\nName-Real: PagerMCP\nExpire-Date: 1d\n%commit\n",
+        capture_output=True,
+        check=True,
+    )
+    old_public = subprocess.run(["gpg", "--homedir", str(home), "--armor", "--export", "PagerMCP"], capture_output=True, check=True).stdout.decode()
+
+    ring = GpgKeyring(str(tmp_path))
+    ring.home = home
+    ring.ensure()  # key expires within the renewal window -> a second key is made
+    pub_records = subprocess.run(["gpg", "--homedir", str(home), "--list-keys", "--with-colons"], capture_output=True, check=True).stdout.decode()
+    assert sum(1 for line in pub_records.splitlines() if line.startswith("pub:")) == 2
+    assert ring.public_key() != old_public  # the newest key is advertised now
+
+    # a message encrypted to the OLD key still decrypts during the overlap
+    armored = gpg_encrypt(old_public, "550e8400-e29b-41d4-a716-446655440000", tmp_path / "client2")
+    assert ring.decrypt(armored) == "550e8400-e29b-41d4-a716-446655440000"
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

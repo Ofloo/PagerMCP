@@ -2,7 +2,7 @@
 
 ## P2P: bestemmings-UUID versleutelen (server-public-key via /settings)
 
-**Status:** ontwerp-idee — feature voor 0.13.x, niet voor de 0.12.x-patchreeks.
+**Status: GEÏMPLEMENTEERD in v0.13.0** (gpgkeys.py; auto-keygen in DATA_DIR/gnupg, 1 jaar geldig + renew 30 dagen voor expiry met overlap; `p2p.public_key`/`key_id`/`gpg_enabled` in /settings; `P2P_GPG_ENABLED` standaard aan; `mailbox_encrypted` verplicht op het p2p-pad; decrypt-faal = 400).
 
 ### Probleem
 Bij P2P store-and-forward relayen peers hetzelfde pakket door. Naast de

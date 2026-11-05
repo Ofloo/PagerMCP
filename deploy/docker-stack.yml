@@ -58,6 +58,8 @@ services:
       # PAGER_LOG_RETENTION_DAYS: "3"
       # Optional: allow push to trusted internal/LAN distributors (SSRF guard).
       # PUSH_ENDPOINT_ALLOWLIST: "up.internal.example,10.13.40.0/24"
+      # P2P: verplicht GPG-versleutelde bestemmings-UUID (standaard aan).
+      # P2P_GPG_ENABLED: "1"
     ports:
       - "${PAGER_PORT:-8080}:8080"
     volumes:

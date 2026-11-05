@@ -28,6 +28,7 @@ except ImportError:
     markdown = None
 
 from . import __build__, __version__
+from .gpgkeys import GpgKeyring
 from .storage import MailboxStore
 
 
@@ -149,6 +150,22 @@ def build_app() -> web.Application:
     p2p_max_age = env_float("P2P_MAX_MESSAGE_AGE_SECONDS", 604800)
     p2p_max_entries = int(os.getenv("P2P_DEDUPE_MAX_ENTRIES", "1000"))
     p2p_max_per_mailbox = int(os.getenv("P2P_DEDUPE_MAX_PER_MAILBOX", "256"))
+    # P2P encrypted destination UUID: a keypair is generated on first start
+    # (DATA_DIR/gnupg), valid for a year, renewed automatically near expiry.
+    p2p_gpg_enabled = os.getenv("P2P_GPG_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+    p2p_keyring = None
+    p2p_public_key = None
+    p2p_key_id = None
+    if p2p_gpg_enabled and GpgKeyring.available():
+        try:
+            p2p_keyring = GpgKeyring(os.getenv("DATA_DIR") or None)
+            p2p_keyring.ensure()
+            p2p_public_key = p2p_keyring.public_key()
+            p2p_key_id = p2p_keyring.key_id()
+        except Exception:
+            p2p_keyring = None
+            p2p_public_key = None
+            p2p_key_id = None
     store = MailboxStore(
         os.getenv("DATA_DIR") or None,
         env_float("MAILBOX_TTL_DAYS", 30),
@@ -222,6 +239,9 @@ def build_app() -> web.Application:
             "max_message_age_seconds": min(p2p_max_age, store.message_ttl) if store.message_ttl else p2p_max_age,
             "max_entries": p2p_max_entries,
             "max_per_mailbox": p2p_max_per_mailbox,
+            "gpg_enabled": p2p_keyring is not None,
+            "public_key": p2p_public_key,
+            "key_id": p2p_key_id,
         },
         "connections": {"max_per_mailbox": max_conns},
         "persistence": store.db is not None,
@@ -353,6 +373,17 @@ def build_app() -> web.Application:
         if not isinstance(payload, dict):
             raise web.HTTPBadRequest(text="JSON object required")
         token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() or payload.pop("uuid", "")
+        if payload.get("p2p") and p2p_keyring is not None:
+            # Only the P2P path requires encryption: relays must not see the
+            # destination UUID. The server decrypts to route; failure = 400.
+            if token:
+                raise web.HTTPBadRequest(text="p2p requires mailbox_encrypted (GPG-encrypted destination UUID), not a plain UUID")
+            armored = payload.pop("mailbox_encrypted", None)
+            if not isinstance(armored, str) or not armored.strip():
+                raise web.HTTPBadRequest(text="mailbox_encrypted is required for p2p (encrypt the destination UUID with p2p.public_key from /settings)")
+            token = p2p_keyring.decrypt(armored)
+            if not token:
+                raise web.HTTPBadRequest(text="cannot decrypt mailbox_encrypted")
         if not token:
             raise web.HTTPUnauthorized(text="UUID is required")
         try:
@@ -586,9 +617,11 @@ def build_app() -> web.Application:
             return None
         message: dict[str, Any] = {"token": subscription.endpoint, "android": {"priority": "high"}}
         if kind == "page":
-            message["data"] = {"type": "page", "mailbox": mailbox, "id": str(data.get("id", ""))}
+            message["data"] = {"type": "page", "id": str(data.get("id", ""))}
             if hash_enabled:
                 message["data"]["mailbox_hash"] = _mailbox_hash_hex(mailbox, hash_period)
+            else:
+                message["data"]["mailbox"] = mailbox
             if fcm_include_payload:
                 message["notification"] = {"title": "PagerMCP", "body": str(data.get("message", "New page"))}
         else:
@@ -607,9 +640,11 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "page", token, data)
             elif subscription.channel == "ntfy":
-                ntfy_body = f"New page in mailbox {token}"
+                ntfy_body = "New page"
                 if hash_enabled:
                     ntfy_body += f"\nmailbox_hash: {_mailbox_hash_hex(token, hash_period)}"
+                else:
+                    ntfy_body = f"New page in mailbox {token}"
                 async with session.post(subscription.endpoint, data=ntfy_body.encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             else:
@@ -617,9 +652,11 @@ def build_app() -> web.Application:
                 error = await _endpoint_error(subscription.endpoint, push_allow_hosts, push_allow_nets)
                 if error:
                     return
-                body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
+                body = {"type": "page", "id": data.get("id"), "created_at": data.get("created_at")}
                 if hash_enabled:
                     body["mailbox_hash"] = _mailbox_hash_hex(token, hash_period)
+                else:
+                    body["mailbox"] = token
                 async with session.post(subscription.endpoint, json=body, timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             remove_on = (400, 404, 410) if subscription.channel == "fcm" else (404, 410)
@@ -644,9 +681,11 @@ def build_app() -> web.Application:
                 error = await _endpoint_error(subscription.endpoint, push_allow_hosts, push_allow_nets)
                 if error:
                     return
-                body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
+                body = {"type": "warning", "reason": "subscription-expiring", "expires": subscription.expires}
                 if hash_enabled:
                     body["mailbox_hash"] = _mailbox_hash_hex(subscription.mailbox, hash_period)
+                else:
+                    body["mailbox"] = subscription.mailbox
                 async with session.post(subscription.endpoint, json=body, timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             if status is not None and status in ((400, 404, 410) if subscription.channel == "fcm" else (404, 410)):

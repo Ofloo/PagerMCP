@@ -3,6 +3,7 @@ ARG BUILD_NUMBER=0
 ENV PAGERMCP_BUILD=$BUILD_NUMBER
 WORKDIR /app
 COPY requirements.txt .
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r requirements.txt
 COPY pager_mcp pager_mcp
 RUN chmod -R a+r /app/pager_mcp

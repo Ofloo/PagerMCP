@@ -37,7 +37,18 @@ iedereen met toegang tot de opslag — kan de berichten in principe lezen.
 
 Registreer je een push-endpoint (subscription), dan stuurt de server bij een
 nieuw bericht een **lege trigger** (`{"type":"page","mailbox":"...","mailbox_hash":"...","id":...}`, zonder
-bericht-inhoud) naar dat endpoint. Let op: de trigger bevat wél je
+bericht-inhoud) naar dat endpoint. Sinds v0.13.0 bevat de trigger (standaard) **alleen de roterende
+`mailbox_hash`** = `sha256("<uuid>:<unix-periode>")` en **geen kale UUID meer**.
+Het endpoint is meestal van een derde partij (Google FCM, een ntfy-server of
+een UnifiedPush-distributor), die dus alleen een per-periode-wisselende hash
+ziet — niet welke mailbox het is en niet wat erin staat. De app vergelijkt die
+hash met zijn eigen UUID('s), met de klok-offset uit `GET /settings`
+(`server_time`) en de periode uit `identity_period_seconds`. Wie de hash
+uitschakelt (`MAILBOX_HASH_ENABLED=0`) krijgt de oude vorm met de kale UUID
+(`/settings` → `subscriptions.identity` is dan `"uuid"`). Voor maximale privacy:
+gebruik SSE, dan is er helemaal geen derde partij.
+
+Eerder gold: de trigger bevat wél je
 **mailbox-UUID** — de pagerapp gebruikt dat veld om te weten welke mailbox hij
 moet ophalen. Het endpoint is meestal van een derde partij (Google FCM, een
 ntfy-server of een UnifiedPush-distributor), die dus ziet **welke mailbox-UUID**

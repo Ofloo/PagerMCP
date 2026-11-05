@@ -11,7 +11,7 @@ if [ -w /etc/pkg/FreeBSD.conf ]; then
     sed -i '' 's#/quarterly#/latest#' /etc/pkg/FreeBSD.conf
 fi
 ASSUME_ALWAYS_YES=yes pkg bootstrap
-pkg install -y python312 py312-aiohttp py312-markdown py312-cryptography py312-sqlite3
+pkg install -y python312 py312-aiohttp py312-markdown py312-cryptography py312-sqlite3 gnupg
 pkg clean -y
 
 pw groupadd -n pagermcp 2>/dev/null || true
