@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.3"
+        assert data["version"] == "0.12.4"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -385,6 +385,54 @@ async def test_wait_max_age_rejects_bad_value(monkeypatch):
         token = (await (await client.post("/mailboxes")).json())["uuid"]
         resp = await client.get(f"/mailboxes/{token}/wait?max_age_seconds=abc")
         assert resp.status == 400
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_connection_cap_wait_and_settings(monkeypatch):
+    monkeypatch.setenv("MAX_CONNECTIONS_PER_MAILBOX", "2")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        settings = await (await client.get("/settings")).json()
+        assert settings["connections"]["max_per_mailbox"] == 2
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        t1 = asyncio.create_task(client.get(f"/mailboxes/{token}/wait?timeout_seconds=5"))
+        t2 = asyncio.create_task(client.get(f"/mailboxes/{token}/wait?timeout_seconds=5"))
+        await asyncio.sleep(0.3)
+        third = await client.get(f"/mailboxes/{token}/wait?timeout_seconds=1")
+        assert third.status == 429
+        # cap is per mailbox: another mailbox is unaffected
+        other = (await (await client.post("/mailboxes")).json())["uuid"]
+        other_resp = await client.get(f"/mailboxes/{other}/wait?timeout_seconds=0.2")
+        assert other_resp.status == 408
+        # delivering a page releases the waiters, after which new ones are accepted
+        await client.post("/notify", json={"uuid": token, "message": "x"})
+        r1 = await asyncio.wait_for(t1, 2)
+        r2 = await asyncio.wait_for(t2, 2)
+        assert r1.status == 200 and r2.status == 200
+        fourth = await client.get(f"/mailboxes/{token}/wait?timeout_seconds=0.2")
+        assert fourth.status == 200  # the unacked page is delivered again
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_connection_cap_sse(monkeypatch):
+    monkeypatch.setenv("MAX_CONNECTIONS_PER_MAILBOX", "1")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        stream = await client.get(f"/mailboxes/{token}/events")
+        assert stream.status == 200
+        second = await client.get(f"/mailboxes/{token}/events")
+        assert second.status == 429
+        second.close()
+        stream.close()
     finally:
         await client.close()
 

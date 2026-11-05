@@ -176,7 +176,7 @@ While it is on, `POST /ack` marks a message as read (`"acked": true`) and keeps 
 
 ## Server settings
 
-`GET /settings` returns the server's effective, non-secret settings — message/mailbox limits, retention windows, the default wait timeout, SSE keepalive, push-subscription lease and warning windows, supported channels, cleanup interval, and whether storage is persistent — so a client can align itself without guessing. It also reports the live `server_time` (unix seconds) so a client can compute its clock offset before calculating rotating `mailbox_hash` values. It exposes no addresses or secrets.
+`GET /settings` returns the server's effective, non-secret settings — message/mailbox limits, retention windows, the default wait timeout, SSE keepalive, push-subscription lease and warning windows, supported channels, cleanup interval, and whether storage is persistent — so a client can align itself without guessing. It also reports the live `server_time` (unix seconds) so a client can compute its clock offset before calculating rotating `mailbox_hash` values. It also reports `connections.max_per_mailbox` (`MAX_CONNECTIONS_PER_MAILBOX`, default 5): the per-mailbox cap on simultaneously open `/wait`/`/events` connections, above which the server returns `429`. It exposes no addresses or secrets.
 
 ## P2P store-and-forward
 

@@ -164,6 +164,11 @@ def build_app() -> web.Application:
     # until a new message arrives; the client must refresh the mode within this
     # window or retention lapses. Defaults to the message retention (same lifetime).
     webclient_ttl = env_float("WEBCLIENT_TTL_DAYS", 0) or store.message_ttl
+    # Cap on simultaneously open long-lived connections (/wait futures + SSE
+    # subscribers) per mailbox, so one client cannot pin unlimited coroutines
+    # and queues. 0 disables the cap. Advertised via /settings so clients can
+    # size their connection pools accordingly.
+    max_conns = int(os.getenv("MAX_CONNECTIONS_PER_MAILBOX", "5"))
     # Channels that receive a content-less JSON trigger. `ntfy` is added when an
     # ntfy server is configured; it publishes a plain-text wake-up to a topic.
     ntfy_url = os.getenv("NTFY_URL", "").rstrip("/")
@@ -207,6 +212,7 @@ def build_app() -> web.Application:
             "max_entries": p2p_max_entries,
             "max_per_mailbox": p2p_max_per_mailbox,
         },
+        "connections": {"max_per_mailbox": max_conns},
         "persistence": store.db is not None,
     }
 
@@ -462,6 +468,8 @@ def build_app() -> web.Application:
         page = take_fresh(token, max_age)
         if page:
             return web.json_response(page_data(page))
+        if max_conns > 0 and len(waiters.get(token, [])) + len(subscribers.get(token, ())) >= max_conns:
+            raise web.HTTPTooManyRequests(text="too many open connections for this mailbox")
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         waiters.setdefault(token, []).append(future)
         try:
@@ -480,6 +488,8 @@ def build_app() -> web.Application:
         """
         token = request.match_info["token"]
         store.touch(token)
+        if max_conns > 0 and len(waiters.get(token, [])) + len(subscribers.get(token, ())) >= max_conns:
+            raise web.HTTPTooManyRequests(text="too many open connections for this mailbox")
         keepalive = env_float("SSE_KEEPALIVE_SECONDS", 15) or 15
         response = web.StreamResponse(
             status=200,
