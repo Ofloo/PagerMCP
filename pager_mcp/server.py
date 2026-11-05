@@ -64,14 +64,15 @@ def load_fcm_account(raw: str) -> dict[str, Any] | None:
     return None
 
 
-def _mailbox_hash_hex(mailbox: str) -> str:
-    """Rotating, non-identifying trigger identifier: sha256("<mailbox>:<unix-hour>").
+def _mailbox_hash_hex(mailbox: str, period: int = 3600) -> str:
+    """Rotating, non-identifying trigger identifier: sha256("<mailbox>:<unix-period>").
 
-    Hourly rotation keeps one hour's pushes unlinkable from the next for any
-    observer of the push channel, while a client that knows its mailbox UUID can
-    recompute the hash locally (aligning clocks via /settings' server_time).
+    Rotation (default: hourly) keeps one period's pushes unlinkable from the
+    next for any observer of the push channel, while a client that knows its
+    mailbox UUID can recompute the hash locally (aligning clocks via /settings'
+    server_time; the period is advertised as identity_period_seconds).
     """
-    return hashlib.sha256(f"{mailbox}:{int(time.time() // 3600)}".encode()).hexdigest()
+    return hashlib.sha256(f"{mailbox}:{int(time.time() // period)}".encode()).hexdigest()
 
 
 def _parse_allowlist(raw: str) -> tuple[set[str], list[Any]]:
@@ -176,6 +177,10 @@ def build_app() -> web.Application:
     # SSRF guard for generic push endpoints: non-public addresses are refused
     # unless the operator explicitly exempts a host/network (default: none).
     push_allow_hosts, push_allow_nets = _parse_allowlist(os.getenv("PUSH_ENDPOINT_ALLOWLIST", ""))
+    # mailbox_hash in push triggers: on/off for everyone, and the rotation
+    # period (default 3600s = hourly), both advertised via /settings.
+    hash_enabled = os.getenv("MAILBOX_HASH_ENABLED", "1").lower() in ("1", "true", "yes", "on")
+    hash_period = int(os.getenv("MAILBOX_HASH_PERIOD_SECONDS", "3600")) or 3600
     # FCM (Firebase Cloud Messaging) HTTP v1 via a service-account, opt-in per
     # mailbox: a client registers {\"channel\":\"fcm\",\"token\":\"<device token>\"}.
     fcm_project = os.getenv("FCM_PROJECT_ID", "")
@@ -195,7 +200,7 @@ def build_app() -> web.Application:
     # how long it may wait, how big messages may be, the retention windows, the
     # push-subscription lease it must renew within, etc.
     hide_ntfy_url = os.getenv("SETTINGS_HIDE_NTFY_URL", "").lower() in ("1", "true", "yes", "on")
-    subscriptions_settings = {"enabled": True, "channels": sorted(push_channels), "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions}
+    subscriptions_settings = {"enabled": True, "channels": sorted(push_channels), "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions, "identity": "hash" if hash_enabled else "uuid", "identity_period_seconds": hash_period}
     if not hide_ntfy_url:
         # ntfy_url can be an internal hostname; an operator may hide it from the
         # public /settings response (the channel itself keeps working).
@@ -581,11 +586,15 @@ def build_app() -> web.Application:
             return None
         message: dict[str, Any] = {"token": subscription.endpoint, "android": {"priority": "high"}}
         if kind == "page":
-            message["data"] = {"type": "page", "mailbox": mailbox, "mailbox_hash": _mailbox_hash_hex(mailbox), "id": str(data.get("id", ""))}
+            message["data"] = {"type": "page", "mailbox": mailbox, "id": str(data.get("id", ""))}
+            if hash_enabled:
+                message["data"]["mailbox_hash"] = _mailbox_hash_hex(mailbox, hash_period)
             if fcm_include_payload:
                 message["notification"] = {"title": "PagerMCP", "body": str(data.get("message", "New page"))}
         else:
-            message["data"] = {"type": "warning", "reason": "subscription-expiring", "mailbox_hash": _mailbox_hash_hex(mailbox)}
+            message["data"] = {"type": "warning", "reason": "subscription-expiring"}
+            if hash_enabled:
+                message["data"]["mailbox_hash"] = _mailbox_hash_hex(mailbox, hash_period)
         try:
             async with session.post(f"{fcm_base}/v1/projects/{project}/messages:send", json={"message": message}, headers={"Authorization": f"Bearer {access}"}, timeout=ClientTimeout(total=10), allow_redirects=False) as response:
                 return response.status
@@ -598,14 +607,19 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "page", token, data)
             elif subscription.channel == "ntfy":
-                async with session.post(subscription.endpoint, data=f"New page in mailbox {token}\nmailbox_hash: {_mailbox_hash_hex(token)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
+                ntfy_body = f"New page in mailbox {token}"
+                if hash_enabled:
+                    ntfy_body += f"\nmailbox_hash: {_mailbox_hash_hex(token, hash_period)}"
+                async with session.post(subscription.endpoint, data=ntfy_body.encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             else:
                 # Re-validate at push time (DNS answers can change since registration).
                 error = await _endpoint_error(subscription.endpoint, push_allow_hosts, push_allow_nets)
                 if error:
                     return
-                body = {"type": "page", "mailbox": token, "mailbox_hash": _mailbox_hash_hex(token), "id": data.get("id"), "created_at": data.get("created_at")}
+                body = {"type": "page", "mailbox": token, "id": data.get("id"), "created_at": data.get("created_at")}
+                if hash_enabled:
+                    body["mailbox_hash"] = _mailbox_hash_hex(token, hash_period)
                 async with session.post(subscription.endpoint, json=body, timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             remove_on = (400, 404, 410) if subscription.channel == "fcm" else (404, 410)
@@ -621,13 +635,18 @@ def build_app() -> web.Application:
             if subscription.channel == "fcm":
                 status = await fcm_send(session, subscription, "warning", subscription.mailbox, {})
             elif subscription.channel == "ntfy":
-                async with session.post(subscription.endpoint, data=f"PagerMCP: push expires soon\nmailbox_hash: {_mailbox_hash_hex(subscription.mailbox)}".encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
+                ntfy_body = "PagerMCP: push expires soon"
+                if hash_enabled:
+                    ntfy_body += f"\nmailbox_hash: {_mailbox_hash_hex(subscription.mailbox, hash_period)}"
+                async with session.post(subscription.endpoint, data=ntfy_body.encode(), headers=ntfy_headers("PagerMCP"), timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             else:
                 error = await _endpoint_error(subscription.endpoint, push_allow_hosts, push_allow_nets)
                 if error:
                     return
-                body = {"type": "warning", "mailbox": subscription.mailbox, "mailbox_hash": _mailbox_hash_hex(subscription.mailbox), "reason": "subscription-expiring", "expires": subscription.expires}
+                body = {"type": "warning", "mailbox": subscription.mailbox, "reason": "subscription-expiring", "expires": subscription.expires}
+                if hash_enabled:
+                    body["mailbox_hash"] = _mailbox_hash_hex(subscription.mailbox, hash_period)
                 async with session.post(subscription.endpoint, json=body, timeout=timeout, allow_redirects=False) as response:
                     status = response.status
             if status is not None and status in ((400, 404, 410) if subscription.channel == "fcm" else (404, 410)):

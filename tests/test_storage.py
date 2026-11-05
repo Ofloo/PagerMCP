@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.7"
+        assert data["version"] == "0.12.8"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1464,6 +1464,76 @@ async def test_root_readme_is_rendered_once(monkeypatch):
         assert len(calls) == 1
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mailbox_hash_can_be_disabled_and_period_configurable(monkeypatch):
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "127.0.0.1")
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MAILBOX_HASH_ENABLED", "0")
+    monkeypatch.setenv("MAILBOX_HASH_PERIOD_SECONDS", "1800")
+    received = []
+
+    async def hook(request):
+        received.append(await request.json())
+        return web.json_response({"ok": True})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/hook", hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        settings = await (await client.get("/settings")).json()
+        assert settings["subscriptions"]["identity"] == "uuid"
+        assert settings["subscriptions"]["identity_period_seconds"] == 1800
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        endpoint = f"http://127.0.0.1:{receiver.server.port}/hook"
+        await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+        await client.post("/notify", json={"uuid": token, "message": "no hash"})
+        await asyncio.sleep(0.4)
+        assert received and received[0]["mailbox"] == token
+        assert "mailbox_hash" not in received[0]
+    finally:
+        await client.close()
+        await receiver.close()
+
+
+@pytest.mark.asyncio
+async def test_mailbox_hash_custom_period_and_settings(monkeypatch):
+    monkeypatch.setenv("PUSH_ENDPOINT_ALLOWLIST", "127.0.0.1")
+    monkeypatch.setenv("CLEANUP_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("MAILBOX_HASH_PERIOD_SECONDS", "1800")
+    received = []
+
+    async def hook(request):
+        received.append(await request.json())
+        return web.json_response({"ok": True})
+
+    receiver_app = web.Application()
+    receiver_app.add_routes([web.post("/hook", hook)])
+    receiver = TestClient(TestServer(receiver_app))
+    await receiver.start_server()
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        settings = await (await client.get("/settings")).json()
+        assert settings["subscriptions"]["identity"] == "hash"
+        assert settings["subscriptions"]["identity_period_seconds"] == 1800
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        endpoint = f"http://127.0.0.1:{receiver.server.port}/hook"
+        await client.post(f"/mailboxes/{token}/subscriptions", json={"channel": "unifiedpush", "endpoint": endpoint})
+        await client.post("/notify", json={"uuid": token, "message": "half hour"})
+        await asyncio.sleep(0.4)
+        period = int(time.time() // 1800)
+        candidates = {hashlib.sha256(f"{token}:{p}".encode()).hexdigest() for p in (period, period - 1)}
+        assert received and received[0]["mailbox_hash"] in candidates
+    finally:
+        await client.close()
+        await receiver.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

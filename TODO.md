@@ -1,5 +1,68 @@
 # TODO
 
+## P2P: bestemmings-UUID versleutelen (server-public-key via /settings)
+
+**Status:** ontwerp-idee — feature voor 0.13.x, niet voor de 0.12.x-patchreeks.
+
+### Probleem
+Bij P2P store-and-forward relayen peers hetzelfde pakket door. Naast de
+GPG-versleutelde inhoud ziet elke relay-peer nu ook de **bestemmings-mailbox-UUID**
+(in de notify-call). Die UUID is het bearer-adres van de ontvanger; delen met
+alle tussenpeers is onnodig en onwenselijk.
+
+### Voorstel
+- De server krijgt een **eigen sleutelpaar** (PGP/RSA). De **publieke sleutel**
+  wordt via `GET /settings` uitgedeeld (publiek sleutelmateriaal is per
+  definitie openbaar; `/settings` is daarvoor geschikt).
+- De afzender **versleutelt de bestemmings-UUID** met die publieke sleutel en
+  stuurt alleen de ciphertext mee (bijv. `mailbox_encrypted` i.p.v. `uuid`).
+  Relay-peers zien dan geen UUID meer.
+- De server ontsleutelt, routeert, en gebruikt de ontsleutelde UUID voor de
+  p2p-dedupe-cache `(mailbox, p2p_id)` zoals nu.
+- Backwards compatibel: gewone `/notify` met kale UUID blijft bestaan; het
+  versleutelde pad is opt-in voor P2P.
+
+### Gekozen richting: GPG-encryptie van de bestemmings-UUID
+**Reden:** de server moet de bestemmings-UUID kunnen **ontsleutelen om te
+routeren**. De hash+created-variant kan dat niet (zou recipient-claims
+vereisen) en is daarom verworpen.
+
+- Server krijgt een **eigen sleutelpaar**; de **publieke sleutel** wordt via
+  `GET /settings` uitgedeeld (publiek materiaal mag openbaar).
+- P2P-afzender versleutelt de bestemmings-UUID met die publieke sleutel en
+  stuurt `mailbox_encrypted` (ciphertext, base64) i.p.v. `uuid`.
+- Server ontsleutelt met zijn private key, routeert naar de mailbox, en de
+  dedupe-cache `(mailbox, p2p_id)` werkt ongewijzigd.
+- Relay-peers zien alleen ciphertext. **Op het P2P-pad is de versleutelde UUID
+  verplicht** (geen kale `uuid` toegestaan bij `p2p:true`); gewone
+  direct-client `/notify` behoudt kale UUID (TLS naar je eigen server volstaat).
+- De publieke sleutel komt in `/settings` **onder `p2p`** (`public_key` +
+  `key_id`), zodat elke peer de bestemming kan versleutelen zonder iets geheims
+  te delen; `key_id` bepaalt met welke private key de server ontsleutelt.
+- `p2p.gpg_enabled` (bool) geeft aan of de versleuteling aan of uit staat.
+- **Filosofie: de client configureert zichzelf volledig vanuit `/settings`**
+  (kanalen, identity + periode, p2p-public-key, caps, retentie, server_time).
+
+### Open implementatievragen
+- **Schakelaar:** `P2P_GPG_ENABLED` (env, **standaard aan**) — het
+  versleutelde-UUID-pad is uit te zetten voor wie het niet wil.
+- **Key auto-generatie:** bij opstart een sleutelpaar maken als `DATA_DIR` er
+  nog geen bevat (geen handmatige setup vereist).
+- **Levensduur 1 jaar + auto-renew:** de server vernieuwt de sleutel zelf
+  wanneer deze dreigt te verlopen (bijv. 30 dagen ervoor). Overlap: de oude
+  publieke sleutel blijft tijdelijk naast de nieuwe in `/settings` zodat
+  in-flight berichten nog ontsleuteld kunnen worden; elke sleutel krijgt een
+  key-id zodat de server weet met welke private key hij moet ontsleutelen.
+- **gpg-binary in de image** (python:3.12-slim heeft geen gpg → `apt-get
+  install gnupg`; Bastille/Pot: `pkg install gnupg`) of python-gnupg-wrapper
+  (heeft alsnog de binary nodig). RSA-OAEP via `cryptography` zou lichter zijn,
+  maar de keuze is **echt PGP/GPG**.
+- Sleutelopslag: **persistent in `DATA_DIR`** zodat dezelfde publieke sleutel
+  over restarts geldig blijft; bij in-memory mode per-boot genereren (clients
+  lezen dan opnieuw `/settings`).
+- Alleen de UUID versleutelen, of de hele bestemmingsheader?
+- Peers die geen GPG implementeren: kale-UUID-fallback blijft documentatie.
+
 ## Batch-polling: alle mailboxen in één request (blob)
 
 **Status:** idee — feature, geen patch-release.
