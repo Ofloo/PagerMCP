@@ -85,7 +85,9 @@ pagermcp_env="MESSAGE_TTL_DAYS=7 MAILBOX_TTL_DAYS=30 SUBSCRIPTION_TTL_DAYS=30 NT
 `pagermcp_env` is a space-separated list of `KEY=VALUE`; every environment
 variable the server understands (`DATA_DIR`, `*_TTL_DAYS`, `MAX_*`, `SSE_*`,
 `NTFY_*`, `FCM_*`, ...) can be passed this way. For FCM, point
-`FCM_CREDENTIALS` at a service-account JSON file inside the jail.
+`FCM_CREDENTIALS` at a service-account JSON file inside the jail. For debug
+access logging pass `PAGER_LOG_FILE` (a path the `pagermcp` user can write)
+and optionally `PAGER_LOG_RETENTION_DAYS` (default 3); UUIDs are masked.
 
 ## Releasing
 

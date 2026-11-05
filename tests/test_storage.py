@@ -198,7 +198,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.11.0"
+        assert data["version"] == "0.12.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -253,8 +253,8 @@ async def test_privacy_endpoint_serves_privacy_as_plain_text():
         assert "text/plain" in resp.headers["Content-Type"]
         body = await resp.text()
         assert "Privacy" in body
-        assert "logt niets" in body
-        assert "UUID" in body
+        assert "logt standaard niets" in body
+        assert "<uuid>" in body
         assert "max-age=3600" in resp.headers["Cache-Control"]
     finally:
         await client.close()
@@ -1181,6 +1181,34 @@ def test_p2p_cache_capacity_evicts_oldest():
     assert store.p2p_enqueue(token, "id-2", {"message": "2"}, "h2", expires)[0] == "new"
     # id-1 was evicted, so it is new again (and evicts id-2)
     assert store.p2p_enqueue(token, "id-1", {"message": "1"}, "h1", expires)[0] == "new"
+
+
+def test_access_log_masks_uuid(tmp_path, monkeypatch):
+    from pager_mcp.server import configure_access_log
+    import logging
+
+    log = tmp_path / "pager.log"
+    monkeypatch.setenv("PAGER_LOG_FILE", str(log))
+    monkeypatch.setenv("PAGER_LOG_RETENTION_DAYS", "1")
+    logger = configure_access_log()
+    assert logger is not None
+    assert isinstance(logger.handlers[0], logging.Handler)
+    import io
+    from datetime import datetime
+
+    record = logging.LogRecord("aiohttp.access", logging.INFO, "x", 0, '10.0.0.1 - - [05/Nov/2026] "GET /mailboxes/550e8400-e29b-41d4-a716-446655440000/wait HTTP/1.1" 200 0.1', (), None)
+    line = logger.handlers[0].format(record)
+    assert "550e8400-e29b-41d4-a716-446655440000" not in line
+    assert "<uuid>" in line
+    logger.handlers[0].close()
+    logger.removeHandler(logger.handlers[0])
+
+
+def test_access_log_off_by_default(monkeypatch):
+    from pager_mcp.server import configure_access_log
+
+    monkeypatch.delenv("PAGER_LOG_FILE", raising=False)
+    assert configure_access_log() is None
 
 
 def test_pager_plugin_syntax():

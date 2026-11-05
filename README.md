@@ -201,4 +201,6 @@ A Bastille template that installs the same server into a FreeBSD jail — depend
 
 ## Privacy
 
-PagerMCP logs nothing, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.
+PagerMCP logs nothing by default, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.
+
+Optionally, an operator can enable a **rotating debug access log** with `PAGER_LOG_FILE` (off unless set). It records client IP, timestamp, method, path and status per request, **masks UUIDs** (`<uuid>`), and rotates daily, keeping at most `PAGER_LOG_RETENTION_DAYS` (default `3`) days — older files are deleted automatically.

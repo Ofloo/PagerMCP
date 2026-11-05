@@ -1,9 +1,19 @@
 # Privacy
 
-PagerMCP logt niets. De server houdt geen access-, request- of payload-logs bij.
-De enige data die bewaard wordt is de inhoud van je mailbox: de UUID en de
+PagerMCP logt standaard niets. De server houdt geen access-, request- of
+payload-logs bij. De enige data die bewaard wordt is de inhoud van je mailbox: de UUID en de
 berichten in de wachtrij, in het geheugen of in `DATA_DIR` (SQLite). Berichten
 verlopen standaard na 7 dagen, en een lege, ongebruikte mailbox na 30 dagen.
+
+## Optionele debug-logging
+
+Een operator kan voor debug-doeleinden een roterende access-log aanzetten met
+`PAGER_LOG_FILE`. Die logt per request: client-IP, tijdstip, methode, pad en
+status. Daarin worden UUID's **gemaskeerd** (`<uuid>`), en het bestand wordt
+dagelijks geroteerd met maximaal `PAGER_LOG_RETENTION_DAYS` (standaard **3**) dagen
+bewaard — oudere files worden automatisch verwijderd. De bedoeling daarvan is
+alleen om kort terug te kunnen debuggen; het exposure-venster blijft zo klein
+mogelijk.
 
 Dit is een open protocol zonder ingebouwde beveiliging.
 

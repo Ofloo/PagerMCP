@@ -53,6 +53,9 @@ services:
       # Periodically expire mailboxes, messages and subscriptions even when the
       # server is idle, so a forgotten account's data is not kept forever.
       CLEANUP_INTERVAL_SECONDS: "3600"
+      # Optional: rotated debug access log (UUIDs masked, daily rotation).
+      # PAGER_LOG_FILE: "/data/access.log"
+      # PAGER_LOG_RETENTION_DAYS: "3"
     ports:
       - "${PAGER_PORT:-8080}:8080"
     volumes:

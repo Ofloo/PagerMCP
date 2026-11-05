@@ -4,14 +4,21 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import time
 import uuid
+from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, web
+
+try:
+    import markdown
+except ImportError:
+    markdown = None
 
 try:
     import markdown
@@ -643,8 +650,37 @@ def build_app() -> web.Application:
     return app
 
 
+_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
+
+class _UuidMaskFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        return _UUID_RE.sub("<uuid>", super().format(record))
+
+
+def configure_access_log() -> logging.Logger | None:
+    """Optional, rotated access log for debugging.
+
+    Only active when PAGER_LOG_FILE is set. The UUID (the bearer credential) is
+    masked, and the file auto-rotates daily with PAGER_LOG_RETENTION_DAYS (default
+    3) kept, so the exposure window stays small.
+    """
+    log_file = os.getenv("PAGER_LOG_FILE", "")
+    if not log_file:
+        return None
+    days = int(os.getenv("PAGER_LOG_RETENTION_DAYS", "3"))
+    handler = TimedRotatingFileHandler(log_file, when="midnight", backupCount=days)
+    handler.setFormatter(_UuidMaskFormatter('%(asctime)s %(message)s'))
+    logger = logging.getLogger("aiohttp.access")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(handler)
+    return logger
+
+
 def main() -> None:
-    web.run_app(build_app(), host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8080")))
+    access_log = configure_access_log()
+    web.run_app(build_app(), host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8080")), access_log=access_log)
 
 
 if __name__ == "__main__":
