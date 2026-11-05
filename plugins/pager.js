@@ -1,5 +1,5 @@
 const DEFAULT_PAGER_URL = "https://pager.ofloo.io"
-import { chmodSync } from "node:fs"
+import { chmodSync, statSync } from "node:fs"
 // 0 = no server-side age filter: queued pages are still delivered, and old ones
 // are marked STALE. Set PAGER_MAX_AGE_MS to a positive value to expire pages
 // older than that on the server (they are dropped and never delivered).
@@ -74,11 +74,19 @@ export const PagerPlugin = async ({ client, directory }) => {
     },
   }).catch(() => {})
 
+  let sessionCache = { mtimeMs: -1, token: null }
   const readToken = async () => {
-    const file = Bun.file(sessionPath)
-    if (!(await file.exists())) return null
-    const token = (await file.text()).trim()
-    return token || null
+    // Cache on mtime: the file is read once per change, not once per loop.
+    try {
+      const mtimeMs = statSync(sessionPath).mtimeMs
+      if (mtimeMs === sessionCache.mtimeMs) return sessionCache.token
+      const token = ((await Bun.file(sessionPath).text()).trim()) || null
+      sessionCache = { mtimeMs, token }
+      return token
+    } catch {
+      sessionCache = { mtimeMs: -1, token: null }
+      return null
+    }
   }
 
   const ensureToken = async () => {

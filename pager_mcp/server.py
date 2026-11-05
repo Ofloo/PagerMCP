@@ -194,6 +194,12 @@ def build_app() -> web.Application:
     # Effective, non-secret server settings a client can read to align itself:
     # how long it may wait, how big messages may be, the retention windows, the
     # push-subscription lease it must renew within, etc.
+    hide_ntfy_url = os.getenv("SETTINGS_HIDE_NTFY_URL", "").lower() in ("1", "true", "yes", "on")
+    subscriptions_settings = {"enabled": True, "channels": sorted(push_channels), "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions}
+    if not hide_ntfy_url:
+        # ntfy_url can be an internal hostname; an operator may hide it from the
+        # public /settings response (the channel itself keeps working).
+        subscriptions_settings["ntfy_url"] = ntfy_url or None
     settings = {
         "version": __version__,
         "build": __build__,
@@ -202,7 +208,7 @@ def build_app() -> web.Application:
         "retention": {"message_ttl_seconds": store.message_ttl, "mailbox_ttl_seconds": store.mailbox_ttl},
         "wait": {"timeout_seconds": float(os.getenv("WAIT_TIMEOUT_SECONDS", "0"))},
         "sse": {"enabled": True, "keepalive_seconds": env_float("SSE_KEEPALIVE_SECONDS", 15), "queue_max": int(os.getenv("SSE_QUEUE_MAX", "256"))},
-        "subscriptions": {"enabled": True, "channels": sorted(push_channels), "ntfy_url": ntfy_url or None, "fcm_enabled": fcm_account is not None, "lease_seconds": store.subscription_ttl, "warn_seconds": warn_seconds, "max_per_mailbox": store.max_subscriptions},
+        "subscriptions": subscriptions_settings,
         "cleanup_interval_seconds": cleanup_interval,
         "webclient": {"ttl_seconds": webclient_ttl},
         "p2p": {
@@ -227,7 +233,14 @@ def build_app() -> web.Application:
         # clock with the server's before computing rotating mailbox hashes.
         return web.json_response({**settings, "server_time": int(time.time())}, headers={"Cache-Control": "no-cache"})
 
+    readme_cache: dict[str, str] = {}
+
     async def root(_: web.Request) -> web.Response:
+        # The README is static for the lifetime of the process; render it once
+        # and serve the cached HTML on every subsequent request.
+        cached = readme_cache.get("html")
+        if cached is not None:
+            return web.Response(text=cached, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
         readme_path = Path(base_dir) / "README.md"
         if not readme_path.is_file():
             raise web.HTTPNotFound()
@@ -242,6 +255,7 @@ def build_app() -> web.Application:
             f"<title>PagerMCP</title><style>{css}</style></head>"
             f"<main>{body}</main></html>"
         )
+        readme_cache["html"] = page
         return web.Response(text=page, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
 
     async def rfc(_: web.Request) -> web.Response:

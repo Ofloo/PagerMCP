@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.6"
+        assert data["version"] == "0.12.7"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1417,6 +1417,53 @@ def test_pager_sh_session_file_must_contain_uuid(tmp_path):
     assert ok.returncode == 0
     bad_result = subprocess.run(["sh", "-c", extract, "sh", str(bad)])
     assert bad_result.returncode != 0
+
+
+@pytest.mark.asyncio
+async def test_settings_can_hide_ntfy_url(monkeypatch):
+    monkeypatch.setenv("NTFY_URL", "https://ntfy.internal.example")
+    monkeypatch.setenv("SETTINGS_HIDE_NTFY_URL", "1")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        data = await (await client.get("/settings")).json()
+        assert "ntfy_url" not in data["subscriptions"]
+        assert "ntfy" in data["subscriptions"]["channels"]
+    finally:
+        await client.close()
+
+
+def test_purge_indexes_exist(tmp_path):
+    store = MailboxStore(str(tmp_path), 30 * 86400, 7 * 86400, 128)
+    names = {row[1] for row in store.db.execute("SELECT type, name FROM sqlite_master WHERE type='index'")}
+    assert "pages_created_idx" in names
+    assert "push_subscriptions_expires_idx" in names
+
+
+@pytest.mark.asyncio
+async def test_root_readme_is_rendered_once(monkeypatch):
+    import pager_mcp.server as srv
+
+    calls = []
+    real = srv.markdown.markdown
+
+    def counting(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+
+    monkeypatch.setattr(srv.markdown, "markdown", counting)
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        r1 = await client.get("/")
+        r2 = await client.get("/")
+        assert r1.status == 200 and r2.status == 200
+        assert (await r1.text()) == (await r2.text())
+        assert len(calls) == 1
+    finally:
+        await client.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

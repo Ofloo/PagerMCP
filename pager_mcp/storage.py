@@ -58,6 +58,9 @@ class MailboxStore:
             self.db.execute("CREATE TABLE IF NOT EXISTS p2p_dedupe (mailbox TEXT NOT NULL, p2p_id TEXT NOT NULL, message_id TEXT NOT NULL, payload_sha256 TEXT NOT NULL, seen_at REAL NOT NULL, expires_at REAL NOT NULL, PRIMARY KEY (mailbox, p2p_id))")
             self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_expires_idx ON p2p_dedupe(expires_at)")
             self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_seen_idx ON p2p_dedupe(seen_at)")
+            # Purge scans these columns on every cleanup tick.
+            self.db.execute("CREATE INDEX IF NOT EXISTS pages_created_idx ON pages(created)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS push_subscriptions_expires_idx ON push_subscriptions(expires)")
             try:
                 self.db.execute("ALTER TABLE push_subscriptions ADD COLUMN warned REAL NOT NULL DEFAULT 0")
             except sqlite3.OperationalError:
