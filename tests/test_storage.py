@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.12.4"
+        assert data["version"] == "0.12.5"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1335,6 +1335,39 @@ async def test_push_trigger_never_follows_redirects(monkeypatch):
     finally:
         await client.close()
         await receiver.close()
+
+
+def test_drop_privileges_defaults_to_nobody(tmp_path, monkeypatch):
+    from pager_mcp import server as srv
+
+    calls = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "setgroups", lambda g: calls.append(("setgroups", g)))
+    monkeypatch.setattr(os, "setgid", lambda g: calls.append(("setgid", g)))
+    monkeypatch.setattr(os, "setuid", lambda u: calls.append(("setuid", u)))
+    monkeypatch.setattr(os, "chown", lambda p, u, g: calls.append(("chown", str(p), u, g)))
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("PAGER_UID", raising=False)
+    monkeypatch.delenv("PAGER_GID", raising=False)
+    monkeypatch.delenv("PAGER_LOG_FILE", raising=False)
+    srv.drop_privileges()
+    assert ("setuid", 65534) in calls
+    assert ("setgid", 65534) in calls
+    assert calls.index(("setgid", 65534)) < calls.index(("setuid", 65534))
+    assert ("chown", str(tmp_path), 65534, 65534) in calls
+
+
+def test_drop_privileges_noop_when_unprivileged(monkeypatch):
+    from pager_mcp import server as srv
+
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+
+    def boom(*a):
+        raise AssertionError("must not be called when already unprivileged")
+
+    monkeypatch.setattr(os, "setuid", boom)
+    monkeypatch.setattr(os, "setgid", boom)
+    srv.drop_privileges()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

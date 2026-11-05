@@ -787,7 +787,41 @@ def configure_access_log() -> logging.Logger | None:
     return logger
 
 
+def drop_privileges() -> None:
+    """Root at start (backwards compatible), then run as an unprivileged user.
+
+    Fixes ownership of DATA_DIR (including an existing SQLite database from an
+    older, root-run image) and of an existing access log, then drops to
+    PAGER_UID/PAGER_GID (default: nobody, 65534). A no-op when the process
+    already runs unprivileged (e.g. the Bastille/Pot jails, which start as the
+    `pagermcp` user).
+    """
+    if os.geteuid() != 0:
+        return
+    uid = int(os.getenv("PAGER_UID", "65534"))
+    gid = int(os.getenv("PAGER_GID", "65534"))
+    data_dir = os.getenv("DATA_DIR")
+    if data_dir:
+        os.makedirs(data_dir, exist_ok=True)
+        os.chown(data_dir, uid, gid)
+        for entry in os.scandir(data_dir):
+            try:
+                os.chown(entry.path, uid, gid)
+            except OSError:
+                pass
+    log_file = os.getenv("PAGER_LOG_FILE", "")
+    if log_file and os.path.exists(log_file):
+        try:
+            os.chown(log_file, uid, gid)
+        except OSError:
+            pass
+    os.setgroups([])
+    os.setgid(gid)
+    os.setuid(uid)
+
+
 def main() -> None:
+    drop_privileges()
     access_log = configure_access_log()
     web.run_app(build_app(), host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "8080")), access_log=access_log)
 

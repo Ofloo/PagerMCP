@@ -34,7 +34,9 @@ def fix_session_file_ownership(path: Path) -> None:
     try:
         os.chown(path, uid, gid)
     except PermissionError:
-        if (path.stat().st_uid, path.stat().st_gid) != (uid, gid):
+        # A non-root container cannot chown. That is only fatal when the file is
+        # also unusable; if we can read and write it, ownership is left as is.
+        if (path.stat().st_uid, path.stat().st_gid) != (uid, gid) and not os.access(path, os.R_OK | os.W_OK):
             raise
 
 
