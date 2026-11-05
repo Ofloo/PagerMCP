@@ -36,7 +36,7 @@ iedereen met toegang tot de opslag — kan de berichten in principe lezen.
 ## Push naar een telefoon
 
 Registreer je een push-endpoint (subscription), dan stuurt de server bij een
-nieuw bericht een **lege trigger** (`{"type":"page","mailbox":"...","mailbox_hash":"...","id":...}`, zonder
+nieuw bericht een **lege trigger** (`{"type":"page","mailbox_hash":"...","id":...}`, zonder
 bericht-inhoud) naar dat endpoint. Sinds v0.13.0 bevat de trigger (standaard) **alleen de roterende
 `mailbox_hash`** = `sha256("<uuid>:<unix-periode>")` en **geen kale UUID meer**.
 Het endpoint is meestal van een derde partij (Google FCM, een ntfy-server of
@@ -47,18 +47,6 @@ hash met zijn eigen UUID('s), met de klok-offset uit `GET /settings`
 uitschakelt (`MAILBOX_HASH_ENABLED=0`) krijgt de oude vorm met de kale UUID
 (`/settings` → `subscriptions.identity` is dan `"uuid"`). Voor maximale privacy:
 gebruik SSE, dan is er helemaal geen derde partij.
-
-Eerder gold: de trigger bevat wél je
-**mailbox-UUID** — de pagerapp gebruikt dat veld om te weten welke mailbox hij
-moet ophalen. Het endpoint is meestal van een derde partij (Google FCM, een
-ntfy-server of een UnifiedPush-distributor), die dus ziet **welke mailbox-UUID**
-een page kreeg, maar **niet wat** erin staat. Dat is een bewuste afweging: wie
-privacy tegenover die partij wil, gebruikt SSE (geen trigger, geen derde
-partij). Gepland is de kale UUID uit de trigger te halen; vanaf v0.12.2 stuurt elke
-trigger naast de UUID óók de roterende `mailbox_hash` = `sha256("<uuid>:<unix-uur>")`
-mee, zodat apps nu al kunnen overstappen. Je haalt de inhoud daarna zelf op
-via SSE of `/wait`.
-
 Subscriptions hebben een **lease** (standaard 30 dagen): je moet ze verlengen,
 anders schakelt push automatisch uit. Vlak vóór het verlopen (standaard 3 dagen)
 stuurt de server één `warning`-trigger, zodat je op tijd kunt verlengen. Zo
