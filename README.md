@@ -207,6 +207,10 @@ A Bastille template that installs the same server into a FreeBSD jail — depend
 
 The server container starts as root (backwards compatible with existing deployments), `chown`s `DATA_DIR` — including an existing SQLite database from an older root-run image — and any configured access log, then **drops privileges to `nobody` (uid/gid 65534)** before serving. Override the runtime user with `PAGER_UID`/`PAGER_GID` if you deliberately want a different uid. Nobody is the safe default: unlike uid 1000/1001 (which usually already exist on the host), it shares the data directory with no host user. Client-mode usage is unchanged: run the client with `--user "$(id -u):$(id -g)"` so the mounted `.pager_session` belongs to you.
 
+## Protocol documentation
+
+A fully illustrated, self-contained protocol guide (with examples and diagrams) is served at `GET /doc` — no external resources are fetched.
+
 ## Privacy
 
 PagerMCP logs nothing by default, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.

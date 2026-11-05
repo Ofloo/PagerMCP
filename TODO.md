@@ -1,5 +1,83 @@
 # TODO
 
+## Hub / multi-instance roaming (later uit te werken door eigenaar)
+
+**Status:** idee — eigenaar legt dit later uit; geen ontwerp of implementatie nog.
+
+**Leidend principe: deel alleen wat gedeeld móét worden** — dat bespaart
+bandbreedte én privacy. Dus: lookup = alleen een hash (geen UUID/payload);
+registratie = alleen roterende hashes, opt-in; geen heartbeats/meldingen;
+berichten blijven op de eigenaar-instance en worden niet gesynchroniseerd;
+de hub bewaart geen berichten en de cache verloopt met de hash-periode.
+
+Richting: de pager-server opsplitsen in een **hub**-model waarbij meerdere
+instances zich kunnen **inschrijven** en clients kunnen **roamen** tussen
+instances — kortom een **federated systeem zonder centrale registratie**:
+elke instance is soeverein en standalone-by-default; wie wil zet alleen
+`HUB_HOST` ("daar moet ik kijken") en is daarmee klaar. Consequenties voor
+het huidige een-replica-model (SQLite per instance) en voor
+UUID-routing/aflevergaranties volgen zodra de eigenaar het toelicht. Eerder
+ontwerpdocument zei al: multi-replica hoort dan een shared store (Redis e.d.)
+te gebruiken zonder het externe protocol te wijzigen.
+
+### Beoogd lookup-mechanisme (toelichting eigenaar)
+**De hub ís de party line**: een directory-dienst waarbij instances zich
+**inschrijven**. De hub bewaart geen berichten, alleen de mapping
+**hash(mailbox-UUID) → instance** (geen kale UUID's).
+1. Komt een request voor een **onbekende mailbox-UUID** binnen, dan vraagt de
+   server aan de **hub** of een instance die mailbox kent — via het
+   **hash-principe** (de hub ziet dus alleen de hash).
+2. **Niemand kent hem** → lokaal een **nieuwe mailbox** (huidige impliciete
+   aanmaakgedrag).
+3. **De hub kent een eigenaar** → **HTTP 302** naar die instance; de client
+   vraagt daar opnieuw.
+Open punten: **geen registratie, geen meldingen, geen heartbeats** — de
+operator geeft via `HUB_HOST` alleen mee *waar* de instance moet kijken, en
+dat is alles. De instance doet uitsluitend een **lookup** bij een onbekende
+UUID. **Leeg = standalone** (huidige gedrag). Verder uit te werken: het
+party-line-request/response-formaat, hash-versheid/periode, split-brain (twee
+instances maken tegelijk dezelfde onbekende UUID aan), vertrouwen van het
+302-doel, en hoe de hub zelf aan zijn eigenaar-mapping komt (buiten de
+instance om; geen instance-registratie of -rapportering).
+
+### Verfijningen (eigenaar)
+- **Protocol-verfijning:** bij `mailbox_encrypted` hoort een **verplichte
+  `key_id`** — de fingerprint van het certificaat waarmee versleuteld is
+  (**alleen verplicht als er versleuteld wordt**; bij kale `uuid` geen
+  vereiste). Daarmee weet de server (a) met welke private key hij moet
+  ontsleutelen (renew-overlap met meerdere sleutels) en (b) voor welke
+  instance het bericht is in het federatieve model (fingerprint = server-id;
+  onbekende/verkeerde fingerprint → 400, of later 302 naar die instance).
+  hoeft toe te kennen. Nodig voor P2P: de afzender moet weten **met welk
+  certificaat** hij de bestemmings-UUID moet versleutelen. Lookup: hub zegt
+  *welke instance-id* bij een mailbox-hash hoort (en/of diens public key);
+  afzender versleutelt met die instance's cert; de eigenaar ontsleutelt met
+  zijn eigen private key.
+- **Server-id ≠ `hostname`**: op Docker is dat de random container-id (wijzigt
+  bij elke redeploy); op Bastille/Pot wel stabiel (`pager`/`pagerpot.test`).
+  Beter: **de PGP-key-fingerprint als server-id** (persistent in DATA_DIR,
+  stabiel over redeploys, en direct de id van het P2P-certificaat), met een
+  env-override (`PAGER_SERVER_ID`) voor een eigen naam. Bijkomend voordeel:
+  de P2P-client **kent die fingerprint al** (het is de key-id van de public key
+  waarmee hij versleutelt), dus er is geen aparte id-uitwisseling nodig — de
+  hub zegt alleen *welke fingerprint* bij de mailbox-hash hoort.
+- **Optionele registratie van vastgehouden mailboxen bij de hub**: een instance
+  kan (opt-in, naast het kale query-model) zijn mailboxen als **hash** bij de
+  hub melden, zodat de hub de mapping **cachet** en niet bij elke lookup hoeft
+  rond te vragen.
+- **Hash-rotatie (bijv. elke 24h)**: anders kan de hub mailboxen onbeperkt
+  volgen. Met een roterende hash is de cache alleen binnen de periode
+  linkbaar. Beide kanten berekenen dezelfde hash (`sha256(uuid:periode)`),
+  met klok-offset via `/settings` `server_time`; periode instelbaar via env
+  (bijv. `HUB_HASH_PERIOD_SECONDS=86400`).
+- **Hub-cache TTL = de hash-periode** (default 24h, configureerbaar): een
+  geregistreerde hash verloopt vanzelf mee met de rotatie; geen eeuwige
+  mapping.
+- **De hub leidt de servers via zijn eigen `/settings`**: hij adverteert daar
+  zijn parameters (hash-periode, cache-TTL, ...), zodat een instance zich
+  **zelf configureert** tegen de hub — hetzelfde principe als clients
+  tegenover elke PagerMCP-server.
+
 ## P2P: bestemmings-UUID versleutelen (server-public-key via /settings)
 
 **Status: GEÏMPLEMENTEERD in v0.13.0** (gpgkeys.py; auto-keygen in DATA_DIR/gnupg, 1 jaar geldig + renew 30 dagen voor expiry met overlap; `p2p.public_key`/`key_id`/`gpg_enabled` in /settings; `P2P_GPG_ENABLED` standaard aan; `mailbox_encrypted` verplicht op het p2p-pad; decrypt-faal = 400).

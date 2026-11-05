@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.13.0"
+        assert data["version"] == "0.13.1"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1683,6 +1683,37 @@ def test_gpg_key_renews_near_expiry_and_old_key_still_decrypts(tmp_path):
     # a message encrypted to the OLD key still decrypts during the overlap
     armored = gpg_encrypt(old_public, "550e8400-e29b-41d4-a716-446655440000", tmp_path / "client2")
     assert ring.decrypt(armored) == "550e8400-e29b-41d4-a716-446655440000"
+
+
+@pytest.mark.asyncio
+async def test_doc_endpoint_serves_self_contained_documentation():
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.get("/doc")
+        assert resp.status == 200
+        assert "text/html" in resp.headers["Content-Type"]
+        body = await resp.text()
+        assert "PagerMCP" in body
+        assert "mailbox_hash" in body
+        assert "mailbox_encrypted" in body
+        assert "identity_period_seconds" in body
+        # fully self-contained: inline stylesheet, no external resources
+        assert "<style>" in body
+        assert "<link" not in body
+        assert "cdn." not in body
+        assert "https://cdn" not in body
+    finally:
+        await client.close()
+
+
+def test_gpg_binary_resolves_even_without_path(monkeypatch):
+    from pager_mcp import gpgkeys
+
+    monkeypatch.setattr(gpgkeys.shutil, "which", lambda _: None)
+    resolved = gpgkeys._gpg_binary()
+    assert resolved is not None and os.path.exists(resolved)
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

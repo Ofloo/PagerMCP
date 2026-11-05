@@ -22,9 +22,28 @@ RENEW_BEFORE_SECONDS = 30 * 86400  # renew 30 days before expiry
 KEY_VALIDITY = "1y"
 
 
+def _gpg_binary() -> str | None:
+    """Resolve the gpg binary without relying on PATH alone.
+
+    Service daemons (rc.d on FreeBSD, some container supervisors) run with a
+    minimal PATH that does not include /usr/local/bin, where gnupg installs.
+    shutil.which() alone would then wrongly report gpg as unavailable.
+    """
+    found = shutil.which("gpg")
+    if found:
+        return found
+    for candidate in ("/usr/local/bin/gpg", "/usr/bin/gpg", "/bin/gpg", "/usr/sbin/gpg"):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+_GPG_BIN = _gpg_binary()
+
+
 def _gpg(home: Path, *args: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["gpg", "--homedir", str(home), "--batch", "--yes", *args],
+        [_GPG_BIN or "gpg", "--homedir", str(home), "--batch", "--yes", *args],
         input=input_bytes,
         capture_output=True,
         timeout=30,
@@ -43,7 +62,7 @@ class GpgKeyring:
 
     @staticmethod
     def available() -> bool:
-        return shutil.which("gpg") is not None
+        return _GPG_BIN is not None
 
     def _secret_fingerprints(self) -> list[str]:
         result = _gpg(self.home, "--list-secret-keys", "--with-colons")

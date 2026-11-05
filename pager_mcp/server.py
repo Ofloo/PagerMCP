@@ -295,6 +295,37 @@ def build_app() -> web.Application:
             raise web.HTTPNotFound()
         return web.FileResponse(privacy_path, headers={**static_cache, "Content-Type": "text/plain; charset=utf-8"})
 
+    doc_cache: dict[str, str] = {}
+
+    async def doc(_: web.Request) -> web.Response:
+        """Illustrated protocol documentation, fully self-contained.
+
+        DOC.md is rendered once and cached; the vendored Bootstrap stylesheet is
+        inlined, so the page makes zero external requests (no CDN, no fonts).
+        """
+        cached = doc_cache.get("html")
+        if cached is not None:
+            return web.Response(text=cached, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
+        doc_path = Path(__file__).parent / "DOC.md"
+        if not doc_path.is_file():
+            raise web.HTTPNotFound()
+        if markdown is None:
+            raise web.HTTPInternalServerError(text="markdown package is required to serve the documentation")
+        body = markdown.markdown(doc_path.read_text(encoding="utf-8"), output_format="html5", extensions=["tables", "fenced_code"])
+        body = body.replace("<table>", '<table class="table table-striped table-sm">')
+        css = (Path(__file__).parent / "bootstrap.min.css").read_text(encoding="utf-8")
+        page = (
+            "<!DOCTYPE html>"
+            '<html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            "<title>PagerMCP protocol documentation</title>"
+            f"<style>{css}</style></head>"
+            '<body><main class="container py-4" style="max-width: 960px">'
+            f"{body}</main></body></html>"
+        )
+        doc_cache["html"] = page
+        return web.Response(text=page, headers={**static_cache, "Content-Type": "text/html; charset=utf-8"})
+
     async def sample(request: web.Request) -> web.Response:
         name = request.match_info.get("name", "")
         sample_dir = os.path.join(base_dir, "sample")
@@ -825,7 +856,7 @@ def build_app() -> web.Application:
             await push_state["session"].close()
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
+    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app
