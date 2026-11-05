@@ -5,7 +5,7 @@
 # Usage: ./run.sh [version]
 set -eu
 
-version="${1:-0.12.1}"
+version="${1:-0.12.2}"
 
 podman run -d --name pagermcp \
     -p 8080:8080 \

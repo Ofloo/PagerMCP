@@ -35,7 +35,7 @@ On `POST /notify` the server sends each registered endpoint a **data-only trigge
 
 **Channels.** A subscription names one of these built-in channels; further channels (e.g. Web Push/VAPID) are additive on the same registry.
 
-- **generic HTTP** (`unifiedpush`, `http`, `webhook`): register with `{"channel": "...", "endpoint": "https://..."}`; the endpoint receives `{"type": "page", "mailbox": "...", "id": "..."}` (e.g. a UnifiedPush distributor URL).
+- **generic HTTP** (`unifiedpush`, `http`, `webhook`): register with `{"channel": "...", "endpoint": "https://..."}`; the endpoint receives `{"type": "page", "mailbox": "...", "mailbox_hash": "<sha256>", "id": "..."}` (e.g. a UnifiedPush distributor URL).
 - **ntfy**: enabled by `NTFY_URL` (optionally `NTFY_TOKEN` for a protected topic); register with `{"channel": "ntfy", "topic": "<topic>"}`; the server publishes a content-free wake-up (`Title: PagerMCP`, body "New page in mailbox <uuid>") to `{NTFY_URL}/{topic}`.
 - **fcm** (Firebase Cloud Messaging HTTP v1): enabled by a service account (`FCM_CREDENTIALS` as a JSON file path or inline, plus `FCM_PROJECT_ID` if the account carries none); register per mailbox with `{"channel": "fcm", "token": "<device token>"}`; the server sends a high-priority Android message that is **data-only by default** (the payload stays on the server) unless `FCM_INCLUDE_PAYLOAD` is set; an `UNREGISTERED`/`INVALID_ARGUMENT` reply removes the token.
 

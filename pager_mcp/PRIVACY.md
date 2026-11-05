@@ -36,7 +36,7 @@ iedereen met toegang tot de opslag — kan de berichten in principe lezen.
 ## Push naar een telefoon
 
 Registreer je een push-endpoint (subscription), dan stuurt de server bij een
-nieuw bericht een **lege trigger** (`{"type":"page","mailbox":...}`, zonder
+nieuw bericht een **lege trigger** (`{"type":"page","mailbox":"...","mailbox_hash":"...","id":...}`, zonder
 bericht-inhoud) naar dat endpoint. Let op: de trigger bevat wél je
 **mailbox-UUID** — de pagerapp gebruikt dat veld om te weten welke mailbox hij
 moet ophalen. Het endpoint is meestal van een derde partij (Google FCM, een
