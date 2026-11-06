@@ -6,7 +6,7 @@
 
 ### Variant: P2P-mesh i.p.v. hub (nieuwste richting van de eigenaar)
 
-**Status: GEÏMPLEMENTEERD in v0.14.0** (mesh.py; PAGER_PEERS, WHO HAS voor mailbox-hashes én fingerprints, 302-roaming, hop-limit + seen-set, statische + dynamische peer-blacklist, MESH_OPEN_QUERIES, PAGER_PUBLIC_URL; one-sided open peering).
+**Status: GEÏMPLEMENTEERD in v0.14.x** (mesh.py; PAGER_PEERS, WHO HAS voor mailbox-hashes én fingerprints, 302-roaming, hop-limit + seen-set, statische + dynamische peer-blacklist, MESH_OPEN_QUERIES, PAGER_PUBLIC_URL; one-sided open peering).
 Geen hub, maar een **peer-to-peer-netwerk**:
 - **`PAGER_PEERS=host1,host2,...`** via env: je directe peers; zij doen hetzelfde.
 - Bij een onbekende UUID stuurt de server **"WHO HAS `<hash>`?"** naar zijn

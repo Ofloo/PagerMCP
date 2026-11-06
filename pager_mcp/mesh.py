@@ -47,13 +47,20 @@ class Mesh:
         self.seen_queries: dict[str, float] = {}
         self.query_times: dict[str, list[float]] = {}
         self.dynamic_blacklist: dict[str, float] = {}
+        # Fingerprints are exchanged during peering: no WHO HAS needed for them.
+        self.peer_fingerprints: dict[str, str] = {}
+        self.own_fingerprint: str | None = None
 
     @property
     def enabled(self) -> bool:
         return bool(self.peers)
 
-    def hash_for(self, value: str) -> str:
-        period = int(time.time() // self.hash_period) if self.hash_period else 0
+    def hash_for(self, value: str, at: float | None = None) -> str:
+        # WHOHAS <unixtime> <sha256>: the hash is sha256("<value>:<period-index>")
+        # computed with the unix time carried by the query, so the receiver can
+        # recompute exactly the same hash (no guessing at period boundaries).
+        at = time.time() if at is None else at
+        period = int(at // self.hash_period) if self.hash_period else 0
         return hashlib.sha256(f"{value}:{period}".encode()).hexdigest()
 
     def _peer_host(self, peer: str) -> str:
@@ -86,19 +93,36 @@ class Mesh:
         self.seen_queries[query_id] = now
         return False
 
+    def note_peer_fingerprint(self, peer_url: str, fingerprint: str | None) -> None:
+        if peer_url and fingerprint:
+            self.peer_fingerprints[peer_url.rstrip("/")] = fingerprint
+
+    def instance_for_fingerprint(self, fingerprint: str) -> str | None:
+        for peer_url, fp in self.peer_fingerprints.items():
+            if fp == fingerprint:
+                return peer_url
+        return None
+
     async def query(self, session: ClientSession, kind: str, value: str) -> str | None:
-        """Ask the mesh WHO HAS <hash of value>; return the owner's base URL."""
+        """Ask the mesh WHO HAS <value>; return the owner's base URL.
+
+        Mailbox lookups carry a rotating hash (privacy); fingerprint lookups
+        carry the fingerprint itself (a public key id, public by design).
+        """
         if not self.enabled:
             return None
         query_id = str(uuid.uuid4())
         self._seen(query_id)  # never process our own query when it comes back
-        body = {
-            "kind": kind,
-            "hash": self.hash_for(value),
-            "query_id": query_id,
-            "hops": self.max_hops,
-            "origin": self.public_url,
-        }
+        if kind == "fingerprint":
+            # WHOHAS <fingerprint> remains as a fallback for unknown peers;
+            # normally fingerprints are already exchanged while peering.
+            body = {"fingerprint": value, "query_id": query_id, "hops": self.max_hops, "origin": self.public_url}
+        else:
+            now = time.time()
+            # WHOHAS <unixtime> <sha256>: hash + the time it was computed with.
+            body = {"time": now, "hash": self.hash_for(value, now), "query_id": query_id, "hops": self.max_hops, "origin": self.public_url}
+        if self.own_fingerprint:
+            body["origin_fingerprint"] = self.own_fingerprint
         return await self._ask_peers(session, body, exclude=None)
 
     async def _ask_peers(self, session: ClientSession, body: dict[str, Any], exclude: str | None) -> str | None:
@@ -110,6 +134,8 @@ class Mesh:
                     if response.status != 200:
                         continue
                     data = await response.json()
+                    # Peering: learn the responder's key fingerprint as well.
+                    self.note_peer_fingerprint(peer, data.get("fingerprint"))
                     if data.get("found") and data.get("instance"):
                         return str(data["instance"])
             except Exception:
@@ -118,14 +144,20 @@ class Mesh:
 
     async def handle_query(self, session: ClientSession, body: dict[str, Any], owns) -> dict[str, Any]:
         """Answer a WHO HAS query: locally owned, forwarded, or not found."""
-        kind = body.get("kind")
-        digest = body.get("hash")
         query_id = str(body.get("query_id") or "")
         hops = int(body.get("hops") or 0)
         origin = str(body.get("origin") or "")
-        if not kind or not digest or not query_id:
+        self.note_peer_fingerprint(origin, body.get("origin_fingerprint"))
+        fingerprint = body.get("fingerprint")
+        digest = body.get("hash")
+        at = body.get("time")
+        if not query_id or (not fingerprint and not digest):
             return {"found": False}
-        if owns(kind, digest):
+        # Two query shapes: WHOHAS <fingerprint> (a public key id) and
+        # WHOHAS <unixtime> <sha256> (a mailbox hash with its timestamp).
+        # Only a recognised value yields "I have it".
+        owned = owns("fingerprint", fingerprint, None) if fingerprint else owns("mailbox", digest, at)
+        if owned:
             return {"found": True, "instance": self.public_url}
         if self._seen(query_id):
             return {"found": False, "seen": True}

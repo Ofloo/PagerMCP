@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.14.0"
+        assert data["version"] == "0.14.1"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1800,7 +1800,11 @@ async def test_mesh_unknown_fingerprint_redirects_to_key_owner(monkeypatch, tmp_
         fingerprint = settings_a["p2p"]["key_id"]
         token = (await (await a.post("/mailboxes")).json())["uuid"]
         armored = gpg_encrypt(settings_a["p2p"]["public_key"], token, tmp_path / "client")
-        # B does not own that key -> it must 302 to A (the fingerprint owner)
+        # peering first: B's WHO HAS for that mailbox also exchanges fingerprints
+        peek = await b.get(f"/mailboxes/{token}/messages", allow_redirects=False)
+        assert peek.status == 302
+        # B does not own that key -> it must 302 to A (the fingerprint owner),
+        # now via the peering-exchanged fingerprint mapping (no extra lookup)
         payload = {"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "mailbox_encrypted": armored, "key_id": fingerprint, "message": "x"}
         resp = await b.post("/notify", json=payload, allow_redirects=False)
         assert resp.status == 302

@@ -182,6 +182,12 @@ def build_app() -> web.Application:
         int(os.getenv("MESH_BLACKLIST_SECONDS", "3600")),
     )
     mesh_open_queries = os.getenv("MESH_OPEN_QUERIES", "1").lower() in ("1", "true", "yes", "on")
+    mesh.own_fingerprint = p2p_key_id
+    if mesh.enabled and not os.getenv("PAGER_PUBLIC_URL"):
+        import sys as _sys
+        # Your peering hostname: the public base URL you hand out to peers.
+        # Without it, 302 redirects would point at an unreachable hostname.
+        print("PagerMCP: PAGER_PEERS is set but PAGER_PUBLIC_URL is not; set it to the public base URL you hand out to peers.", file=_sys.stderr)
     store = MailboxStore(
         os.getenv("DATA_DIR") or None,
         env_float("MAILBOX_TTL_DAYS", 30),
@@ -264,11 +270,15 @@ def build_app() -> web.Application:
         "persistence": store.db is not None,
     }
 
-    def mesh_owns(kind: str, digest: str) -> bool:
-        if kind == "mailbox":
-            return any(mesh.hash_for(token) == digest for token in store.mailbox_tokens())
+    def mesh_owns(kind: str, digest: str, at: float | None = None) -> bool:
+        # WHOHAS <unixtime> <sha256> for mailboxes (hash recomputed with the
+        # query's own timestamp, so both sides are in sync), WHOHAS
+        # <fingerprint> for keys (a public key id, checked directly).
+        # Only a recognised value yields "I have it".
         if kind == "fingerprint":
-            return p2p_keyring is not None and any(mesh.hash_for(fp) == digest for fp in p2p_keyring.fingerprints())
+            return p2p_keyring is not None and digest in p2p_keyring.fingerprints()
+        if kind == "mailbox":
+            return any(mesh.hash_for(token, at) == digest for token in store.mailbox_tokens())
         return False
 
     async def mesh_query(request: web.Request) -> web.Response:
@@ -287,6 +297,8 @@ def build_app() -> web.Application:
         if session is None or session.closed:
             raise web.HTTPServiceUnavailable(text="mesh is not ready")
         data = await mesh.handle_query(session, body, mesh_owns)
+        if p2p_key_id:
+            data["fingerprint"] = p2p_key_id
         return web.json_response(data)
 
     @web.middleware
@@ -478,8 +490,13 @@ def build_app() -> web.Application:
             if not isinstance(key_id, str) or not key_id.strip():
                 raise web.HTTPBadRequest(text="key_id is required with mailbox_encrypted (the fingerprint of the public key used)")
             if not p2p_keyring.has_key(key_id):
-                # Not our key: WHO HAS this fingerprint on the mesh, then 302.
+                # Not our key: fingerprints are exchanged while peering, so a
+                # known peer gets a direct 302 without any extra lookup. The
+                # WHO HAS fingerprint query remains as a fallback for unknowns.
                 if mesh.enabled:
+                    target = mesh.instance_for_fingerprint(key_id)
+                    if target:
+                        return web.Response(status=302, headers={"Location": target + "/notify"})
                     session = push_state["session"]
                     if session is not None and not session.closed:
                         target = await mesh.query(session, "fingerprint", key_id)

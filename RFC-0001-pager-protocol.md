@@ -117,7 +117,7 @@ The P2P path requires the destination UUID to be **GPG-encrypted** to the server
 With `PAGER_PEERS` (comma-separated base URLs; empty = standalone), an instance answers **unknown** mailbox UUIDs and unknown P2P key fingerprints by querying its peers with `POST /mesh/query`:
 
 ```json
-{"kind": "mailbox"|"fingerprint", "hash": "sha256(<value>:<unix-period>)", "query_id": "<uuid>", "hops": 3, "origin": "<base-url>"}
+Mailbox lookup: {"time": <unixtime>, "hash": "sha256(<uuid>:<period-index>)", "query_id": "<uuid>", "hops": 3, "origin": "<base-url>", "origin_fingerprint": "<key-id>"} — the hash is computed with the timestamp carried by the query (both sides in sync). Fingerprint lookup: {"fingerprint": "<key-id>", ...}. Fingerprints are exchanged while peering (every query/response carries the instance's key id), so an unknown P2P `key_id` gets a direct 302 from the peer-fingerprint mapping without an extra lookup; the WHO HAS fingerprint query is only a fallback.
 ```
 
 A peer that owns the value answers `{"found": true, "instance": "<base-url>"}`; the requesting instance then answers the client with **302** to that instance (`PAGER_PUBLIC_URL` sets each instance's own public base URL). Queries are forwarded with `hops - 1` and a `query_id` seen-set prevents loops; the originator marks its own query id as seen. When nobody owns a mailbox UUID, it is created locally as before. Only period-rotating hashes travel the mesh (`MESH_HASH_PERIOD_SECONDS`, default 86400); message payloads never leave the owning instance.
