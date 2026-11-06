@@ -155,13 +155,35 @@ A client can configure itself entirely from `GET /settings`:
   `PAGER_LOG_RETENTION_DAYS` (default 3) days.
 - This documentation page is fully self-contained: no third-party requests.
 
-## 9. Federation (design)
+## 9. Federation (peer mesh)
 
-A server can be pointed at a hub (`HUB_HOST`; empty = standalone): on an
-unknown UUID it asks the hub — using a hash, never the raw UUID — and either
-creates the mailbox locally or answers **302** to the owning instance. The
-hub is only a directory (hash → instance fingerprint); messages themselves
-never travel through it.
+A server is standalone by default. With `PAGER_PEERS=host1,host2` it joins a
+**one-sided, open peer mesh** — no hub, no registration:
+
+```
+client                instance B (unknown UUID)       instance A (owner)
+  |  GET /mailboxes/<uuid>/messages |                       |
+  |------------------------------->|                        |
+  |                                | WHOHAS <unixtime> <sha> |
+  |                                |------------------------>|
+  |                                |<-- {"found":true, ...} -|
+  |<-- 302 Location: A/... --------|                        |
+  |                                                      |
+  |-------------------- GET on A ------------------------>|
+```
+
+- The query is `WHOHAS <unixtime> <sha256>`: `sha256("<uuid>:<period-index>")`
+  computed with the timestamp carried by the query, so both sides are in sync.
+- Only hashes travel the mesh — never the raw UUID, and never message content.
+- Unknown everywhere → the mailbox is simply created locally (standalone
+  behaviour).
+- Queries are forwarded with a hop limit and a query-id seen-set (no loops).
+- **Fingerprints are exchanged while peering**, so an encrypted P2P post with
+  an unknown `key_id` gets a direct **302** to the peer owning that key.
+- Abusive peers are blacklisted (`PAGER_PEER_BLACKLIST`, plus a dynamic
+  rate-based blacklist). Set `MESH_OPEN_QUERIES=0` for a closed mesh.
+- `PAGER_PUBLIC_URL` is your peering hostname: the public base URL you hand
+  out to your peers.
 
 ## 10. Handy endpoints
 

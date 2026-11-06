@@ -5,6 +5,13 @@ payload-logs bij. De enige data die bewaard wordt is de inhoud van je mailbox: d
 berichten in de wachtrij, in het geheugen of in `DATA_DIR` (SQLite). Berichten
 verlopen standaard na 7 dagen, en een lege, ongebruikte mailbox na 30 dagen.
 
+## Federatie (peer mesh)
+
+Peers zien bij een lookup alleen een **roterende hash** van een mailbox-UUID
+(of een publieke sleutel-fingerprint), nooit de kale UUID en nooit
+bericht-inhoud. Berichten blijven op de eigenaar-instance; de client wordt met
+een 302 daarheen gestuurd. Geen registratie of centrale accounts nodig.
+
 ## Optionele debug-logging
 
 Een operator kan voor debug-doeleinden een roterende access-log aanzetten met
