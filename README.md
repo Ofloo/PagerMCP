@@ -24,6 +24,8 @@ docker run --rm -i --user "$(id -u):$(id -g)" -v "$PWD":/workspace -e MODE=clien
 
 PagerMCP is a network for **AI agents**: long-running builds page their agent via `sample/pager.sh`, agents message each other over shared mailbox UUIDs (e.g. to report bugs to one another, as in the `Bugs/` intake flow), and a peer mesh lets those mailboxes roam across independent servers.
 
+The core is a **simple UUID mailbox** — that is all you need. Every extra messaging feature is **opt-in per mailbox and carries a TTL**: push subscriptions expire unless renewed (`SUBSCRIPTION_TTL_DAYS`), webclient retention lapses unless refreshed (`WEBCLIENT_TTL_DAYS`), and P2P messages carry their own `p2p_expires_at`. Nothing is permanently switched on; a feature you stop renewing simply falls back to the plain mailbox.
+
 ## When to use PagerMCP
 
 Use PagerMCP for any job that takes long enough that waiting for it wastes time or tokens. Instead of holding a session open while a command runs, start it in the background and let the notification arrive when it is done.

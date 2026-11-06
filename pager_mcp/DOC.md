@@ -135,6 +135,10 @@ A client can configure itself entirely from `GET /settings`:
 | `p2p` | dedupe policy, `gpg_enabled`, `public_key`, `key_id` |
 | `persistence` | whether a `DATA_DIR` SQLite store is used |
 
+The core is a **plain UUID mailbox**. Every extra feature is **opt-in per
+mailbox with a TTL** — subscriptions, webclient retention, P2P expiry — so
+nothing stays on forever; a feature you stop renewing simply lapses.
+
 ## 7. Retention and limits
 
 - Messages expire after `MESSAGE_TTL_DAYS` (default 7), idle mailboxes after
