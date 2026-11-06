@@ -221,6 +221,16 @@ Abuse is fenced off with a **peer blacklist**: static via `PAGER_PEER_BLACKLIST`
 
 A fully illustrated, self-contained protocol guide (with examples and diagrams) is served at `GET /doc` — no external resources are fetched.
 
+## Ecosystem
+
+The same privacy-first protocol is used by a small family of free, open projects:
+
+- **PagerMCP** — the server and protocol (this repository).
+- **PagerAPP** — the messaging app for people: <https://github.com/Ofloo/PagerAPP>
+- **PagerSMTPd** — the SMTP gateway: mail to `uuid@pager.ofloo.io` becomes a page in that mailbox, ideal for cron jobs and monitoring where only mail is available: <https://github.com/Ofloo/PagerSMTPd>
+
+All of them share the same principles: no accounts, bearer UUIDs, GPG content, rotating hashes, TTLs everywhere, self-hosting on Docker/Podman/Bastille/Pot.
+
 ## Privacy
 
 PagerMCP logs nothing by default, but it is an open protocol without built-in security: your privacy depends entirely on keeping the mailbox UUID secret. Anyone who has a UUID can read that mailbox and send to it. The full statement is served at `GET /privacy`.

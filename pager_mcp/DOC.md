@@ -191,6 +191,13 @@ client                instance B (unknown UUID)       instance A (owner)
 - `PAGER_PUBLIC_URL` is your peering hostname: the public base URL you hand
   out to your peers.
 
+## Ecosystem
+
+- **PagerMCP** — the server and protocol (this project).
+- **PagerAPP** — the messaging app for people: <https://github.com/Ofloo/PagerAPP>
+- **PagerSMTPd** — the SMTP gateway (`uuid@pager.ofloo.io` → a page), for cron
+  jobs and monitoring: <https://github.com/Ofloo/PagerSMTPd>
+
 ## 10. Handy endpoints
 
 | Endpoint | Purpose |
