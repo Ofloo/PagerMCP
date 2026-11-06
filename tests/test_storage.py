@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.14.2"
+        assert data["version"] == "0.14.3"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1815,6 +1815,33 @@ async def test_mesh_unknown_fingerprint_redirects_to_key_owner(monkeypatch, tmp_
     finally:
         await a.close()
         await b.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_hop_limit_is_enforced(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    monkeypatch.setenv("PAGER_PEERS", "http://127.0.0.1:18889")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        settings = await (await client.get("/settings")).json()
+        assert settings["mesh"]["max_hops"] == 3
+        base = {"fingerprint": "deadbeef", "query_id": str(uuid.uuid4())}
+        over = await client.post("/mesh/query", json={**base, "hops": 99})
+        assert over.status == 403
+        exhausted = await client.post("/mesh/query", json={**base, "query_id": str(uuid.uuid4()), "hops": 0})
+        assert exhausted.status == 403
+        desync = await client.post("/mesh/query", json={**base, "query_id": str(uuid.uuid4()), "hops": 3, "started": 2})
+        assert desync.status == 403  # remaining can never exceed started
+        assert (await desync.json())["error"] == "hops not in sync"
+        # a peer with a different hop budget is out of sync with the mesh
+        other_budget = await client.post("/mesh/query", json={**base, "query_id": str(uuid.uuid4()), "hops": 5, "started": 5})
+        assert other_budget.status == 403
+        fine = await client.post("/mesh/query", json={**base, "query_id": str(uuid.uuid4()), "hops": 3, "started": 3})
+        assert fine.status == 200
+    finally:
+        await client.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

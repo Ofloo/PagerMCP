@@ -299,6 +299,8 @@ def build_app() -> web.Application:
         data = await mesh.handle_query(session, body, mesh_owns)
         if p2p_key_id:
             data["fingerprint"] = p2p_key_id
+        if data.get("error") in ("hop limit exceeded", "hops not in sync"):
+            return web.json_response(data, status=403)
         return web.json_response(data)
 
     @web.middleware

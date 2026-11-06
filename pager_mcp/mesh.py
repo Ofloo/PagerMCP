@@ -113,14 +113,15 @@ class Mesh:
             return None
         query_id = str(uuid.uuid4())
         self._seen(query_id)  # never process our own query when it comes back
+        started = self.max_hops
         if kind == "fingerprint":
             # WHOHAS <fingerprint> remains as a fallback for unknown peers;
             # normally fingerprints are already exchanged while peering.
-            body = {"fingerprint": value, "query_id": query_id, "hops": self.max_hops, "origin": self.public_url}
+            body = {"fingerprint": value, "query_id": query_id, "hops": self.max_hops, "started": started, "origin": self.public_url}
         else:
             now = time.time()
             # WHOHAS <unixtime> <sha256>: hash + the time it was computed with.
-            body = {"time": now, "hash": self.hash_for(value, now), "query_id": query_id, "hops": self.max_hops, "origin": self.public_url}
+            body = {"time": now, "hash": self.hash_for(value, now), "query_id": query_id, "hops": self.max_hops, "started": started, "origin": self.public_url}
         if self.own_fingerprint:
             body["origin_fingerprint"] = self.own_fingerprint
         return await self._ask_peers(session, body, exclude=None)
@@ -151,8 +152,24 @@ class Mesh:
         fingerprint = body.get("fingerprint")
         digest = body.get("hash")
         at = body.get("time")
+        started = int(body.get("started") or self.max_hops)
         if not query_id or (not fingerprint and not digest):
             return {"found": False}
+        # Enforce the hop limit: an inflated hop count (a peer setting more than
+        # the maximum) or an exhausted query (the "Nth hop" beyond the limit)
+        # is denied, not silently answered with "not found".
+        if hops > self.max_hops or hops <= 0:
+            return {"found": False, "error": "hop limit exceeded"}
+        # A peer must keep the hop bookkeeping in sync: the remaining budget can
+        # never exceed what the query started with, otherwise the link is out
+        # of sync and the query is rejected.
+        if hops > started:
+            return {"found": False, "error": "hops not in sync"}
+        # The whole mesh uses ONE hop budget: a query from a server configured
+        # with a different MESH_QUERY_HOPS would make the chain inconsistent,
+        # so it is rejected as out of sync.
+        if started != self.max_hops:
+            return {"found": False, "error": "hops not in sync"}
         # Two query shapes: WHOHAS <fingerprint> (a public key id) and
         # WHOHAS <unixtime> <sha256> (a mailbox hash with its timestamp).
         # Only a recognised value yields "I have it".
@@ -161,8 +178,6 @@ class Mesh:
             return {"found": True, "instance": self.public_url}
         if self._seen(query_id):
             return {"found": False, "seen": True}
-        if hops <= 0:
-            return {"found": False}
         forwarded = {**body, "hops": hops - 1, "origin": self.public_url}
         instance = await self._ask_peers(session, forwarded, exclude=origin)
         return {"found": True, "instance": instance} if instance else {"found": False}

@@ -177,7 +177,9 @@ client                instance B (unknown UUID)       instance A (owner)
 - Only hashes travel the mesh — never the raw UUID, and never message content.
 - Unknown everywhere → the mailbox is simply created locally (standalone
   behaviour).
-- Queries are forwarded with a hop limit and a query-id seen-set (no loops).
+- Queries are forwarded with a hop limit and a query-id seen-set (no loops);
+  **all servers in a mesh share the same hop budget** (`MESH_QUERY_HOPS`), and
+  an out-of-sync budget or an exceeded limit is denied with `403`.
 - **Fingerprints are exchanged while peering**, so an encrypted P2P post with
   an unknown `key_id` gets a direct **302** to the peer owning that key.
 - Abusive peers are blacklisted (`PAGER_PEER_BLACKLIST`, plus a dynamic
