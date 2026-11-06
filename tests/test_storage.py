@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.14.1"
+        assert data["version"] == "0.14.2"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
