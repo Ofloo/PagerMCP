@@ -29,6 +29,7 @@ except ImportError:
 
 from . import __build__, __version__
 from .gpgkeys import GpgKeyring
+from .mesh import Mesh
 from .storage import MailboxStore
 
 
@@ -166,6 +167,21 @@ def build_app() -> web.Application:
             p2p_keyring = None
             p2p_public_key = None
             p2p_key_id = None
+
+    # Federated peer mesh (one-sided, open peering): unknown mailboxes and
+    # unknown P2P key fingerprints are looked up with WHO HAS <hash> and get a
+    # 302 to the owning instance. No peers configured = standalone (unchanged).
+    mesh_public_url = os.getenv("PAGER_PUBLIC_URL", "").rstrip("/") or f"http://{os.getenv('HOSTNAME', 'localhost')}:{os.getenv('PORT', '8080')}"
+    mesh = Mesh(
+        os.getenv("PAGER_PEERS", ""),
+        os.getenv("PAGER_PEER_BLACKLIST", ""),
+        mesh_public_url,
+        int(os.getenv("MESH_HASH_PERIOD_SECONDS", "86400")),
+        int(os.getenv("MESH_QUERY_HOPS", "3")),
+        int(os.getenv("MESH_PEER_MAX_QPM", "120")),
+        int(os.getenv("MESH_BLACKLIST_SECONDS", "3600")),
+    )
+    mesh_open_queries = os.getenv("MESH_OPEN_QUERIES", "1").lower() in ("1", "true", "yes", "on")
     store = MailboxStore(
         os.getenv("DATA_DIR") or None,
         env_float("MAILBOX_TTL_DAYS", 30),
@@ -244,8 +260,54 @@ def build_app() -> web.Application:
             "key_id": p2p_key_id,
         },
         "connections": {"max_per_mailbox": max_conns},
+        "mesh": {"enabled": mesh.enabled, "peers": len(mesh.peers), "hash_period_seconds": mesh.hash_period, "max_hops": mesh.max_hops, "open_queries": mesh_open_queries},
         "persistence": store.db is not None,
     }
+
+    def mesh_owns(kind: str, digest: str) -> bool:
+        if kind == "mailbox":
+            return any(mesh.hash_for(token) == digest for token in store.mailbox_tokens())
+        if kind == "fingerprint":
+            return p2p_keyring is not None and any(mesh.hash_for(fp) == digest for fp in p2p_keyring.fingerprints())
+        return False
+
+    async def mesh_query(request: web.Request) -> web.Response:
+        peer = request.remote or ""
+        if mesh.is_blacklisted(peer):
+            raise web.HTTPForbidden(text="peer is blacklisted")
+        if not mesh.note_query(peer):
+            raise web.HTTPTooManyRequests(text="peer is temporarily blacklisted for query flooding")
+        if not mesh_open_queries and not any(peer in mesh._peer_host(p) or peer == mesh._peer_host(p) for p in mesh.peers):
+            raise web.HTTPForbidden(text="this instance only answers configured peers")
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="invalid JSON") from exc
+        session = push_state["session"]
+        if session is None or session.closed:
+            raise web.HTTPServiceUnavailable(text="mesh is not ready")
+        data = await mesh.handle_query(session, body, mesh_owns)
+        return web.json_response(data)
+
+    @web.middleware
+    async def mesh_discovery(request: web.Request, handler):
+        # Unknown mailbox on a meshed instance: WHO HAS the hash, and if a peer
+        # owns it the client gets a 302 to that instance. Otherwise it is just
+        # created locally, exactly as in standalone mode.
+        if mesh.enabled and request.path.startswith("/mailboxes/"):
+            token = request.match_info.get("token", "")
+            if token:
+                try:
+                    uuid.UUID(token)
+                except ValueError:
+                    return await handler(request)
+                if token not in store.mailbox_tokens():
+                    session = push_state["session"]
+                    if session is not None and not session.closed:
+                        target = await mesh.query(session, "mailbox", token)
+                        if target:
+                            return web.Response(status=302, headers={"Location": target + request.path_qs})
+        return await handler(request)
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
@@ -412,6 +474,18 @@ def build_app() -> web.Application:
             armored = payload.pop("mailbox_encrypted", None)
             if not isinstance(armored, str) or not armored.strip():
                 raise web.HTTPBadRequest(text="mailbox_encrypted is required for p2p (encrypt the destination UUID with p2p.public_key from /settings)")
+            key_id = payload.pop("key_id", None)
+            if not isinstance(key_id, str) or not key_id.strip():
+                raise web.HTTPBadRequest(text="key_id is required with mailbox_encrypted (the fingerprint of the public key used)")
+            if not p2p_keyring.has_key(key_id):
+                # Not our key: WHO HAS this fingerprint on the mesh, then 302.
+                if mesh.enabled:
+                    session = push_state["session"]
+                    if session is not None and not session.closed:
+                        target = await mesh.query(session, "fingerprint", key_id)
+                        if target:
+                            return web.Response(status=302, headers={"Location": target + "/notify"})
+                raise web.HTTPBadRequest(text="unknown key_id for this instance")
             token = p2p_keyring.decrypt(armored)
             if not token:
                 raise web.HTTPBadRequest(text="cannot decrypt mailbox_encrypted")
@@ -856,7 +930,8 @@ def build_app() -> web.Application:
             await push_state["session"].close()
 
     app = web.Application(client_max_size=max_bytes)
-    app.add_routes([web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
+    app.middlewares.append(mesh_discovery)
+    app.add_routes([web.post("/mesh/query", mesh_query), web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app

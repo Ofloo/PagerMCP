@@ -4,6 +4,28 @@
 
 **Status:** idee — eigenaar legt dit later uit; geen ontwerp of implementatie nog.
 
+### Variant: P2P-mesh i.p.v. hub (nieuwste richting van de eigenaar)
+
+**Status: GEÏMPLEMENTEERD in v0.14.0** (mesh.py; PAGER_PEERS, WHO HAS voor mailbox-hashes én fingerprints, 302-roaming, hop-limit + seen-set, statische + dynamische peer-blacklist, MESH_OPEN_QUERIES, PAGER_PUBLIC_URL; one-sided open peering).
+Geen hub, maar een **peer-to-peer-netwerk**:
+- **`PAGER_PEERS=host1,host2,...`** via env: je directe peers; zij doen hetzelfde.
+- Bij een onbekende UUID stuurt de server **"WHO HAS `<hash>`?"** naar zijn
+  peers; wie de mailbox kent antwoordt, anders wordt de query doorgestuurd naar
+  hún peers (met **hop-limit/TTL** zodat iedereen iedereen kan bereiken).
+- Gevonden → **302** naar die peer; niemand → lokaal nieuwe mailbox.
+- Alleen een **hash** op de draad, geen kale UUID; berichten blijven op de
+  eigenaar-instance.
+- Open punten: **loop-preventie** (query-id + seen-set), hop-limit,
+  peer-authenticatie, split-brain bij gelijktijdige aanmaak.
+- **Peering is one-sided en open** (eigenaar + voorkeur): alleen de vragende
+  kant configureert (`PAGER_PEERS`); de andere kant hoeft niets te doen en
+  iedereen die wil peeren kan dat gewoon doen. Geen wederzijdse handshake.
+  Afbakening via hashes, hop-limit, en de blacklist (statisch + dynamisch bij
+  query-flooding). Optioneel gesloten: `MESH_OPEN_QUERIES=0` beantwoordt dan
+  alleen geconfigureerde peers.
+- (De hub-variant hieronder blijft als alternatief staan; de mesh dekt hetzelfde
+  doel zonder directory-server.)
+
 **Leidend principe: deel alleen wat gedeeld móét worden** — dat bespaart
 bandbreedte én privacy. Dus: lookup = alleen een hash (geen UUID/payload);
 registratie = alleen roterende hashes, opt-in; geen heartbeats/meldingen;
@@ -46,8 +68,11 @@ instance om; geen instance-registratie of -rapportering).
   (**alleen verplicht als er versleuteld wordt**; bij kale `uuid` geen
   vereiste). Daarmee weet de server (a) met welke private key hij moet
   ontsleutelen (renew-overlap met meerdere sleutels) en (b) voor welke
-  instance het bericht is in het federatieve model (fingerprint = server-id;
-  onbekende/verkeerde fingerprint → 400, of later 302 naar die instance).
+  instance het bericht is in het federatieve model (fingerprint = server-id).
+  **Bij een onbekende fingerprint: niet meteen 400, maar `WHO HAS
+  <fingerprint>?` naar de peers → 302 naar de instance die die sleutel heeft
+  (en dus kan ontsleutelen).** Pas als niemand hem kent → 400/unknown. Zo
+  is de lookup uniform voor mailbox-hashes én voor fingerprints.
   hoeft toe te kennen. Nodig voor P2P: de afzender moet weten **met welk
   certificaat** hij de bestemmings-UUID moet versleutelen. Lookup: hub zegt
   *welke instance-id* bij een mailbox-hash hoort (en/of diens public key);

@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.13.1"
+        assert data["version"] == "0.14.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1605,14 +1605,14 @@ async def test_p2p_gpg_settings_and_encrypted_uuid_flow(monkeypatch, tmp_path):
 
         expires = int(time.time()) + 3600
         p2p_id = str(uuid.uuid4())
-        first = await client.post("/notify", json={"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": expires, "mailbox_encrypted": armored, "message": "secret"})
+        first = await client.post("/notify", json={"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": expires, "mailbox_encrypted": armored, "key_id": p2p["key_id"], "message": "secret"})
         assert first.status == 200
         assert (await first.json())["duplicate"] is False
         # the server decrypted and routed to the right mailbox
         messages = await (await client.get(f"/mailboxes/{token}/messages")).json()
         assert len(messages["messages"]) == 1
         # dedupe still works on the decrypted mailbox
-        second = await client.post("/notify", json={"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": expires, "mailbox_encrypted": armored, "message": "secret"})
+        second = await client.post("/notify", json={"p2p": True, "p2p_id": p2p_id, "p2p_expires_at": expires, "mailbox_encrypted": armored, "key_id": p2p["key_id"], "message": "secret"})
         assert (await second.json())["duplicate"] is True
     finally:
         await client.close()
@@ -1714,6 +1714,103 @@ def test_gpg_binary_resolves_even_without_path(monkeypatch):
     monkeypatch.setattr(gpgkeys.shutil, "which", lambda _: None)
     resolved = gpgkeys._gpg_binary()
     assert resolved is not None and os.path.exists(resolved)
+
+
+def _mesh_pair(monkeypatch, port_a=18881, port_b=18882):
+    url_a = f"http://127.0.0.1:{port_a}"
+    url_b = f"http://127.0.0.1:{port_b}"
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_a)
+    monkeypatch.setenv("PAGER_PEERS", url_b)
+    app_a = build_app()
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_b)
+    monkeypatch.setenv("PAGER_PEERS", url_a)
+    app_b = build_app()
+    a = TestClient(TestServer(app_a, host="127.0.0.1", port=port_a))
+    b = TestClient(TestServer(app_b, host="127.0.0.1", port=port_b))
+    return a, b, url_a, url_b
+
+
+@pytest.mark.asyncio
+async def test_mesh_redirects_unknown_mailbox_to_owner_and_creates_otherwise(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    a, b, url_a, url_b = _mesh_pair(monkeypatch)
+    await a.start_server()
+    await b.start_server()
+    try:
+        token = (await (await a.post("/mailboxes")).json())["uuid"]
+        resp = await b.get(f"/mailboxes/{token}/messages", allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"].startswith(url_a)
+        followed = await a.get(f"/mailboxes/{token}/messages")
+        assert followed.status == 200
+        # unknown everywhere: no redirect, it is simply created locally
+        fresh = str(uuid.uuid4())
+        resp2 = await b.get(f"/mailboxes/{fresh}/messages", allow_redirects=False)
+        assert resp2.status == 200
+    finally:
+        await a.close()
+        await b.close()
+
+
+@pytest.mark.asyncio
+async def test_mesh_blacklisted_peer_gets_403(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    monkeypatch.setenv("PAGER_PEER_BLACKLIST", "127.0.0.1")
+    monkeypatch.setenv("PAGER_PEERS", "http://127.0.0.1:18889")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        resp = await client.post("/mesh/query", json={"kind": "mailbox", "hash": "x", "query_id": str(uuid.uuid4()), "hops": 1})
+        assert resp.status == 403
+    finally:
+        await client.close()
+
+
+def test_mesh_rate_limit_blacklists_abusive_peer():
+    from pager_mcp.mesh import Mesh
+
+    mesh = Mesh("", "", "http://x", max_qpm=2)
+    assert mesh.note_query("10.0.0.9") is True
+    assert mesh.note_query("10.0.0.9") is True
+    assert mesh.note_query("10.0.0.9") is False  # over the limit -> blacklisted
+    assert mesh.is_blacklisted("10.0.0.9") is True
+
+
+@requires_gpg
+@pytest.mark.asyncio
+async def test_mesh_unknown_fingerprint_redirects_to_key_owner(monkeypatch, tmp_path):
+    port_a, port_b = 18883, 18884
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "1")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "a"))
+    monkeypatch.setenv("P2P_GPG_ENABLED", "1")
+    monkeypatch.setenv("PAGER_PUBLIC_URL", f"http://127.0.0.1:{port_a}")
+    monkeypatch.setenv("PAGER_PEERS", f"http://127.0.0.1:{port_b}")
+    app_a = build_app()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "b"))
+    monkeypatch.setenv("PAGER_PUBLIC_URL", f"http://127.0.0.1:{port_b}")
+    monkeypatch.setenv("PAGER_PEERS", f"http://127.0.0.1:{port_a}")
+    app_b = build_app()
+    a = TestClient(TestServer(app_a, host="127.0.0.1", port=port_a))
+    b = TestClient(TestServer(app_b, host="127.0.0.1", port=port_b))
+    await a.start_server()
+    await b.start_server()
+    try:
+        settings_a = await (await a.get("/settings")).json()
+        fingerprint = settings_a["p2p"]["key_id"]
+        token = (await (await a.post("/mailboxes")).json())["uuid"]
+        armored = gpg_encrypt(settings_a["p2p"]["public_key"], token, tmp_path / "client")
+        # B does not own that key -> it must 302 to A (the fingerprint owner)
+        payload = {"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "mailbox_encrypted": armored, "key_id": fingerprint, "message": "x"}
+        resp = await b.post("/notify", json=payload, allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"].startswith(f"http://127.0.0.1:{port_a}")
+        # reposting to the owning instance works
+        accepted = await a.post("/notify", json=payload)
+        assert accepted.status == 200
+    finally:
+        await a.close()
+        await b.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

@@ -207,6 +207,12 @@ A Bastille template that installs the same server into a FreeBSD jail — depend
 
 The server container starts as root (backwards compatible with existing deployments), `chown`s `DATA_DIR` — including an existing SQLite database from an older root-run image — and any configured access log, then **drops privileges to `nobody` (uid/gid 65534)** before serving. Override the runtime user with `PAGER_UID`/`PAGER_GID` if you deliberately want a different uid. Nobody is the safe default: unlike uid 1000/1001 (which usually already exist on the host), it shares the data directory with no host user. Client-mode usage is unchanged: run the client with `--user "$(id -u):$(id -g)"` so the mounted `.pager_session` belongs to you.
 
+## Federation (peer mesh)
+
+A server is standalone by default. With `PAGER_PEERS=host1,host2` it joins a **one-sided, open peer mesh**: when a request arrives for an **unknown mailbox UUID**, the server asks its peers **WHO HAS `<hash>`** (only a period-rotating hash, never the raw UUID, travels the mesh; queries are forwarded with a hop limit and a query-id seen-set so they cannot loop). If a peer owns the mailbox the client gets a **302** to that instance; if nobody does, the mailbox is simply created locally — exactly as in standalone mode. The same mechanism handles unknown P2P `key_id` fingerprints: an encrypted P2P post to the wrong instance gets a **302** to the instance that owns that key (and can decrypt it). `mailbox_encrypted` now requires the `key_id` fingerprint of the public key used.
+
+Abuse is fenced off with a **peer blacklist**: static via `PAGER_PEER_BLACKLIST`, and dynamic when a peer floods queries (`MESH_PEER_MAX_QPM`, temporarily blacklisted for `MESH_BLACKLIST_SECONDS`). Operators who want a closed mesh set `MESH_OPEN_QUERIES=0` (only configured peers are answered). Set `PAGER_PUBLIC_URL` to the instance's own base URL so redirects point at a reachable address. `GET /settings` → `mesh` reports the effective configuration.
+
 ## Protocol documentation
 
 A fully illustrated, self-contained protocol guide (with examples and diagrams) is served at `GET /doc` — no external resources are fetched.

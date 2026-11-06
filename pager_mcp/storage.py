@@ -108,6 +108,12 @@ class MailboxStore:
             for key in [k for k, entry in self.p2p.items() if entry["expires_at"] <= now]:
                 del self.p2p[key]
 
+    def mailbox_tokens(self) -> list[str]:
+        """All mailbox tokens this instance knows (for mesh ownership checks)."""
+        if self.db:
+            return [row[0] for row in self.db.execute("SELECT token FROM mailboxes")]
+        return list(self.mailboxes)
+
     def touch(self, token: str) -> None:
         with self.lock:
             now = time.time()

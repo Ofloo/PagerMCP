@@ -102,6 +102,12 @@ class GpgKeyring:
         if self._expiry_of_newest_public() - int(time.time()) < RENEW_BEFORE_SECONDS:
             self._generate()
 
+    def fingerprints(self) -> list[str]:
+        return self._secret_fingerprints()
+
+    def has_key(self, fingerprint: str) -> bool:
+        return fingerprint in self._secret_fingerprints()
+
     def key_id(self) -> str | None:
         return self._newest_public_fingerprint()
 
