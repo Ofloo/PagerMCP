@@ -2,7 +2,7 @@
 
 ## Hub / multi-instance roaming (later uit te werken door eigenaar)
 
-**Status:** idee — eigenaar legt dit later uit; geen ontwerp of implementatie nog.
+**Status: GEÏMPLEMENTEERD als peer-mesh in v0.14.x. De hub-as-party-line variant is daarmee achterhaald en wordt niet gebouwd.**
 
 ### Variant: P2P-mesh i.p.v. hub (nieuwste richting van de eigenaar)
 
@@ -209,7 +209,7 @@ logging/caching van antwoorden ongevoelig maakt voor de bearer-waarden.
 
 ## FCM: mailbox-UUID in de push-trigger-body (gewogen → roterende hash)
 
-**Status:** gewogen afweging — geen actie nodig in de server-code nu.
+**Status: GEÏMPLEMENTEERD in v0.13.0** — triggers dragen bij `MAILBOX_HASH_ENABLED=1` (default) alleen de roterende `mailbox_hash` en geen kale UUID meer; `0` geeft de oude uuid-vorm. De roterende sha256-periode is instelbaar via `MAILBOX_HASH_PERIOD_SECONDS` en staat in `/settings` (`subscriptions.identity` + `identity_period_seconds`).
 
 ### Achtergrond
 De data-only trigger die de server naar een push-endpoint stuurt
@@ -253,3 +253,11 @@ bepalen welke mailbox hij op moet halen.
   (todo: FCM/UUID-lek documenteren — sessie).
 - Aanbeveling aan gebruikers: SSE waar mogelijk (geen derde partij, geen
   UUID-lek, direct).
+
+## Rate limiting (open — ontwerp door de eigenaar)
+
+**Status:** open — de eigenaar denkt eerst over het protocol na. Uitgangspunten:
+ruime in-app-limiet als vangnet (firewall/reverse proxy is de primaire
+verdediging), rekening houden met N-mailboxen per client (20 contacten = 20
+polls per cyclus), en batch-poll (zie boven) als structurele oplossing om het
+aantal requests per client te beperken.
