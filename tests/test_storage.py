@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.14.3"
+        assert data["version"] == "0.14.4"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1684,6 +1684,10 @@ def test_gpg_key_renews_near_expiry_and_old_key_still_decrypts(tmp_path):
     armored = gpg_encrypt(old_public, "550e8400-e29b-41d4-a716-446655440000", tmp_path / "client2")
     assert ring.decrypt(armored) == "550e8400-e29b-41d4-a716-446655440000"
 
+    # the legacy public key placeholder exposes the previous keypair
+    assert ring.legacy_public_key() == old_public
+    assert ring.legacy_key_id() is not None and ring.legacy_key_id() != ring.key_id()
+
 
 @pytest.mark.asyncio
 async def test_doc_endpoint_serves_self_contained_documentation():
@@ -1842,6 +1846,33 @@ async def test_mesh_hop_limit_is_enforced(monkeypatch):
         assert fine.status == 200
     finally:
         await client.close()
+
+
+@requires_gpg
+def test_gpg_newkey_env_rotates_and_prunes_legacy_after_two_message_ttls(tmp_path, monkeypatch):
+    from pager_mcp.gpgkeys import GpgKeyring
+
+    ring = GpgKeyring(str(tmp_path))
+    ring.ensure()
+    first_public = ring.public_key()
+    first_id = ring.key_id()
+
+    monkeypatch.setenv("P2P_GPG_NEWKEY", "1")
+    ring.ensure()  # a new keypair; the first becomes legacy
+    assert ring.key_id() != first_id
+    assert ring.legacy_public_key() == first_public
+    assert ring.legacy_key_id() == first_id
+    # both keys decrypt during the legacy window
+    armored = gpg_encrypt(first_public, "550e8400-e29b-41d4-a716-446655440000", tmp_path / "client")
+    assert ring.decrypt(armored) == "550e8400-e29b-41d4-a716-446655440000"
+
+    monkeypatch.delenv("P2P_GPG_NEWKEY")
+    # after 2x the message TTL the legacy key is obsolete and gets pruned
+    future = time.time() + 14 * 86400 + 3600
+    monkeypatch.setattr(time, "time", lambda: future)
+    ring.ensure()
+    assert ring.legacy_public_key() is None
+    assert len(ring._public_keypairs()) == 1
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

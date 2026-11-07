@@ -116,7 +116,9 @@ sender                relays                    owning instance
 - `mailbox_encrypted` is the armored GPG message; `key_id` is required when
   encrypting (it tells the server which private key to use).
 - Keys are generated on first start in `DATA_DIR/gnupg`, valid for one year,
-  renewed automatically 30 days before expiry (old keys still decrypt).
+  renewed automatically 30 days before expiry. `P2P_GPG_NEWKEY=true` rotates on
+  demand; `/settings` then also shows `legacy_public_key` + `legacy_key_id`,
+  kept for 2x the message TTL before being pruned (old keys still decrypt).
 - A plain `uuid` on the P2P path is rejected while encryption is on; set
   `P2P_GPG_ENABLED=0` to allow it.
 

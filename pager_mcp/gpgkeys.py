@@ -92,15 +92,36 @@ class GpgKeyring:
         if result.returncode != 0:
             raise RuntimeError(f"gpg key generation failed: {result.stderr.decode()[:300]}")
 
-    def ensure(self) -> None:
-        """Generate a keypair on first start and renew when expiry is near."""
-        if not self._secret_fingerprints():
+    def ensure(self, legacy_ttl: int = 14 * 86400) -> None:
+        """Key lifecycle: create on first start, rotate on demand or near expiry.
+
+        P2P_GPG_NEWKEY=true forces a new keypair; the previous one becomes the
+        legacy key. Legacy keys are kept for 2x the message TTL after the new
+        key was made (so even a message sent on the old key's last day still
+        decrypts within its own TTL), then removed as obsolete.
+        """
+        newkey = os.getenv("P2P_GPG_NEWKEY", "").lower() in ("1", "true", "yes", "on")
+        if not self._public_keypairs() or newkey:
             self._generate()
-            return
         import time
 
         if self._expiry_of_newest_public() - int(time.time()) < RENEW_BEFORE_SECONDS:
             self._generate()
+        self._prune_obsolete(legacy_ttl)
+
+    def _delete_keypair(self, fingerprint: str) -> None:
+        _gpg(self.home, "--delete-secret-and-public-key", fingerprint)
+
+    def _prune_obsolete(self, legacy_ttl: int) -> None:
+        pairs = self._public_keypairs()
+        if len(pairs) < 2:
+            return
+        import time
+
+        newest_created = pairs[-1][0]
+        for created, fingerprint in pairs[:-1]:
+            if time.time() > newest_created + legacy_ttl:
+                self._delete_keypair(fingerprint)
 
     def fingerprints(self) -> list[str]:
         return self._secret_fingerprints()
@@ -108,8 +129,33 @@ class GpgKeyring:
     def has_key(self, fingerprint: str) -> bool:
         return fingerprint in self._secret_fingerprints()
 
+    def _public_keypairs(self) -> list[tuple[int, str]]:
+        """(created, fingerprint) of every public keypair, oldest first."""
+        result = _gpg(self.home, "--list-keys", "--with-colons")
+        pairs: list[list] = []
+        for line in result.stdout.decode().splitlines():
+            if line.startswith("pub:"):
+                fields = line.split(":")
+                created = int(fields[5]) if fields[5].isdigit() else 0
+                pairs.append([created, None])
+            elif line.startswith("fpr:") and pairs:
+                pairs[-1][1] = line.split(":")[9]
+        return sorted([(created, fp) for created, fp in pairs if fp], key=lambda item: item[0])
+
     def key_id(self) -> str | None:
         return self._newest_public_fingerprint()
+
+    def legacy_key_id(self) -> str | None:
+        """The previous keypair's fingerprint (during a rotation overlap)."""
+        pairs = self._public_keypairs()
+        return pairs[-2][1] if len(pairs) >= 2 else None
+
+    def legacy_public_key(self) -> str | None:
+        fingerprint = self.legacy_key_id()
+        if not fingerprint:
+            return None
+        result = _gpg(self.home, "--armor", "--export", fingerprint)
+        return result.stdout.decode() if result.returncode == 0 else None
 
     def public_key(self) -> str | None:
         fingerprint = self._newest_public_fingerprint()

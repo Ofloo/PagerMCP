@@ -160,10 +160,11 @@ def build_app() -> web.Application:
     if p2p_gpg_enabled and GpgKeyring.available():
         try:
             p2p_keyring = GpgKeyring(os.getenv("DATA_DIR") or None)
-            p2p_keyring.ensure()
+            p2p_keyring.ensure(legacy_ttl=int(2 * env_float("MESSAGE_TTL_DAYS", 7) * 86400))
             p2p_public_key = p2p_keyring.public_key()
             p2p_key_id = p2p_keyring.key_id()
-        except Exception:
+        except Exception as _e:
+            import traceback; traceback.print_exc()
             p2p_keyring = None
             p2p_public_key = None
             p2p_key_id = None
@@ -264,6 +265,8 @@ def build_app() -> web.Application:
             "gpg_enabled": p2p_keyring is not None,
             "public_key": p2p_public_key,
             "key_id": p2p_key_id,
+            "legacy_public_key": p2p_keyring.legacy_public_key() if p2p_keyring else None,
+            "legacy_key_id": p2p_keyring.legacy_key_id() if p2p_keyring else None,
         },
         "connections": {"max_per_mailbox": max_conns},
         "mesh": {"enabled": mesh.enabled, "peers": len(mesh.peers), "hash_period_seconds": mesh.hash_period, "max_hops": mesh.max_hops, "open_queries": mesh_open_queries},
@@ -728,7 +731,8 @@ def build_app() -> web.Application:
                 if response.status != 200:
                     return None
                 payload = await response.json()
-        except Exception:
+        except Exception as _e:
+            import traceback; traceback.print_exc()
             return None
         state["token"] = payload.get("access_token")
         state["expires"] = now + float(payload.get("expires_in", 3600))
@@ -755,7 +759,8 @@ def build_app() -> web.Application:
         try:
             async with session.post(f"{fcm_base}/v1/projects/{project}/messages:send", json={"message": message}, headers={"Authorization": f"Bearer {access}"}, timeout=ClientTimeout(total=10), allow_redirects=False) as response:
                 return response.status
-        except Exception:
+        except Exception as _e:
+            import traceback; traceback.print_exc()
             return None
 
     async def push_trigger(session: ClientSession, token: str, subscription: Any, data: dict[str, Any]) -> None:
@@ -786,7 +791,8 @@ def build_app() -> web.Application:
             remove_on = (400, 404, 410) if subscription.channel == "fcm" else (404, 410)
             if status is not None and status in remove_on:
                 store.remove_subscription(token, subscription.id)
-        except Exception:
+        except Exception as _e:
+            import traceback; traceback.print_exc()
             pass
 
     async def push_warning(session: ClientSession, subscription: Any) -> None:
@@ -816,7 +822,8 @@ def build_app() -> web.Application:
                 store.remove_subscription(subscription.mailbox, subscription.id)
             elif status is not None and status < 400:
                 store.mark_warned(subscription.id)
-        except Exception:
+        except Exception as _e:
+            import traceback; traceback.print_exc()
             pass
 
     def resolve_target(channel: str, body: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:

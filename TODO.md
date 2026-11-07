@@ -105,7 +105,7 @@ instance om; geen instance-registratie of -rapportering).
 
 ## P2P: bestemmings-UUID versleutelen (server-public-key via /settings)
 
-**Status: GEÏMPLEMENTEERD in v0.13.0** (gpgkeys.py; auto-keygen in DATA_DIR/gnupg, 1 jaar geldig + renew 30 dagen voor expiry met overlap; `p2p.public_key`/`key_id`/`gpg_enabled` in /settings; `P2P_GPG_ENABLED` standaard aan; `mailbox_encrypted` verplicht op het p2p-pad; decrypt-faal = 400).
+**Status: GEÏMPLEMENTEERD in v0.13.0** (gpgkeys.py; auto-keygen in DATA_DIR/gnupg, 1 jaar geldig + renew 30 dagen voor expiry met overlap; `p2p.public_key`/`key_id`/`gpg_enabled` in /settings; `P2P_GPG_ENABLED` standaard aan; `mailbox_encrypted` verplicht op het p2p-pad; decrypt-faal = 400; legacy_public_key/legacy_key_id placeholder in /settings; P2P_GPG_NEWKEY=true roteert, legacy blijft 2x message-TTL en wordt dan gepruned).
 
 ### Probleem
 Bij P2P store-and-forward relayen peers hetzelfde pakket door. Naast de
