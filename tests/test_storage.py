@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.14.5"
+        assert data["version"] == "0.15.1"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1896,7 +1896,10 @@ async def test_pager_sh_fork_and_timer():
         )
         assert proc.returncode == 0
         assert time.time() - start < 1  # --fork returns immediately
-        await asyncio.sleep(2.5)  # the child waits 1s and then pages
+        for _ in range(40):  # poll instead of a fixed sleep (no timing flake)
+            if received:
+                break
+            await asyncio.sleep(0.2)
         assert received and received[0]["message"] == "wekker"
         assert received[0]["JOB_ID"] == "fork-timer"
     finally:
@@ -1976,6 +1979,53 @@ async def test_invite_expires(monkeypatch):
         monkeypatch.setattr(time, "time", lambda: future)
         expired = await client.get(f"/invite/{slug}")
         assert expired.status == 404
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_invite_creates_second_mailbox_and_self_destructs_on_first_ack(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{token}/invite", json={"chat": True})
+        data = await created.json()
+        u2 = data["u2"] if "u2" in data else None
+        # the URI carries a fresh, different second mailbox
+        import re as _re
+        m = _re.search(r"u2=([0-9a-f-]{36})", data["uri"])
+        assert m, data["uri"]
+        u2 = m.group(1)
+        assert u2 != token
+        uuid.UUID(u2)  # valid UUID
+        # the scanner's mailbox really exists and can be used
+        s, d = req = None, None
+        msgs = await (await client.get(f"/mailboxes/{u2}/messages")).json()
+        assert msgs["messages"] == []
+        # before any use the invite resolves
+        assert (await client.get(f"/invite/{data['slug']}")).status == 200
+        # the first ack in one of the two mailboxes deletes the invite at once
+        await client.post("/notify", json={"uuid": u2, "message": "test"})
+        page_id = (await (await client.get(f"/mailboxes/{u2}/messages")).json())["messages"][0]["id"]
+        await client.post(f"/mailboxes/{u2}/ack", json={"id": page_id})
+        assert (await client.get(f"/invite/{data['slug']}")).status == 404
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_settings_reports_invites_config(monkeypatch):
+    monkeypatch.setenv("INVITE_TTL_SECONDS", "3600")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        data = await (await client.get("/settings")).json()
+        assert data["invites"]["ttl_seconds"] == 3600
+        assert data["invites"]["scheme"] == "pagerapp"
     finally:
         await client.close()
 

@@ -218,6 +218,10 @@ def build_app() -> web.Application:
     # until a new message arrives; the client must refresh the mode within this
     # window or retention lapses. Defaults to the message retention (same lifetime).
     webclient_ttl = env_float("WEBCLIENT_TTL_DAYS", 0) or store.message_ttl
+    # Invite links: TTL + the URI scheme prefix, advertised via /settings.
+    invite_ttl = int(os.getenv("INVITE_TTL_SECONDS", "86400"))
+    invite_scheme = os.getenv("INVITE_SCHEME", "pagerapp")
+
     # Cap on simultaneously open long-lived connections (/wait futures + SSE
     # subscribers) per mailbox, so one client cannot pin unlimited coroutines
     # and queues. 0 disables the cap. Advertised via /settings so clients can
@@ -282,6 +286,7 @@ def build_app() -> web.Application:
             "legacy_key_id": p2p_keyring.legacy_key_id() if p2p_keyring else None,
         },
         "connections": {"max_per_mailbox": max_conns},
+        "invites": {"ttl_seconds": invite_ttl, "scheme": invite_scheme},
         "mesh": {"enabled": mesh.enabled, "peers": len(mesh.peers), "hash_period_seconds": mesh.hash_period, "max_hops": mesh.max_hops, "open_queries": mesh_open_queries},
         "persistence": store.db is not None,
     }
@@ -426,9 +431,6 @@ def build_app() -> web.Application:
             raise web.HTTPNotFound()
         return web.FileResponse(filepath, headers={**static_cache, "Content-Type": "application/x-sh"})
 
-    invite_ttl = int(os.getenv("INVITE_TTL_SECONDS", "86400"))
-    invite_scheme = os.getenv("INVITE_SCHEME", "pagerapp")
-
     async def create_invite(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
@@ -453,6 +455,11 @@ def build_app() -> web.Application:
         if ttl <= 0 or ttl > 30 * 86400:
             raise web.HTTPBadRequest(text="ttl_seconds out of range")
         chat = bool(body.get("chat"))
+        # A chat needs TWO mailboxes: if the caller did not provide u2, the
+        # server creates a fresh receiving mailbox for the scanner itself.
+        if chat and not u2:
+            u2 = str(uuid.uuid4())
+            store.touch(u2)
         scheme = body.get("scheme") or invite_scheme
         if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*$", str(scheme)):
             raise web.HTTPBadRequest(text="scheme must be a valid URI scheme")
@@ -658,6 +665,14 @@ def build_app() -> web.Application:
         page = store.pop(token)
         return web.json_response({"message": (page_data(page) if page else None)})
 
+    def drop_invite_if_used(token: str) -> None:
+        """An invite lives only until it is actually used: the first ack in one
+        of its mailboxes (u1 or u2) deletes it immediately. Otherwise it simply
+        expires with its TTL.
+        """
+        for record in store.invites_for_mailbox(token):
+            store.delete_invite(record["slug"])
+
     async def ack(request: web.Request) -> web.Response:
         token = request.match_info["token"]
         store.touch(token)
@@ -673,12 +688,14 @@ def build_app() -> web.Application:
             # Webclient retention: acknowledge but keep a copy in the queue until a
             # new message arrives (or the mode lease lapses).
             retained = store.retain(token, str(page_id) if page_id else None)
+            drop_invite_if_used(token)
             return web.json_response({"acked": retained is not None, "retained": retained is not None, "id": retained.id if retained else (str(page_id) if page_id else None)})
         if page_id:
             store.remove(str(page_id))
         else:
             oldest = store.pop(token)
             page_id = oldest.id if oldest else None
+        drop_invite_if_used(token)
         return web.json_response({"acked": page_id is not None, "retained": False, "id": page_id})
 
     async def get_mode(request: web.Request) -> web.Response:

@@ -134,6 +134,19 @@ class MailboxStore:
             return None  # expired invites are simply gone
         return record
 
+    def invites_for_mailbox(self, token: str) -> list[dict]:
+        if self.db:
+            rows = self.db.execute("SELECT slug FROM invites WHERE u1 = ? OR u2 = ?", (token, token)).fetchall()
+            return [{"slug": row[0]} for row in rows]
+        return [r for r in self.invites.values() if r.get("u1") == token or r.get("u2") == token]
+
+    def delete_invite(self, slug: str) -> None:
+        if self.db:
+            self.db.execute("DELETE FROM invites WHERE slug = ?", (slug,))
+            self.db.commit()
+        else:
+            self.invites.pop(slug, None)
+
     def mailbox_tokens(self) -> list[str]:
         """All mailbox tokens this instance knows (for mesh ownership checks)."""
         if self.db:
