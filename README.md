@@ -42,6 +42,8 @@ AI agents should do this automatically: fire long jobs through the pager in the 
 
 ## Sample script
 
+Useful extra options in `pager.sh`: `--fork` detaches into the background and returns immediately (the page is sent when the job finishes), and `--timer <sec>` (aliases `--delay`, `--alarmclock`) waits that many seconds before sending — your own alarm clock, e.g. `pager.sh --fork --notify --timer 3600 --message "ding"`.
+
 `pager.sh` is only a sample. PagerMCP is a plain HTTP API: every notification can be sent directly with `curl` (or any HTTP client), no wrapper or special client required:
 
 ```bash

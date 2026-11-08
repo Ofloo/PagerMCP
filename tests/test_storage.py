@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.14.4"
+        assert data["version"] == "0.14.5"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -1873,6 +1873,34 @@ def test_gpg_newkey_env_rotates_and_prunes_legacy_after_two_message_ttls(tmp_pat
     ring.ensure()
     assert ring.legacy_public_key() is None
     assert len(ring._public_keypairs()) == 1
+
+
+@pytest.mark.asyncio
+async def test_pager_sh_fork_and_timer():
+    received = []
+
+    async def notify_hook(request):
+        received.append(await request.json())
+        return web.json_response({"accepted": True, "id": "x"})
+
+    app = web.Application()
+    app.add_routes([web.post("/notify", notify_hook)])
+    receiver = TestClient(TestServer(app))
+    await receiver.start_server()
+    try:
+        env = dict(os.environ, PAGER_URL=f"http://127.0.0.1:{receiver.server.port}")
+        start = time.time()
+        proc = subprocess.run(
+            ["sample/pager.sh", "--fork", "--notify", "--timer", "1", "--message", "wekker", "--session", str(uuid.uuid4()), "--job-id", "fork-timer"],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+        assert proc.returncode == 0
+        assert time.time() - start < 1  # --fork returns immediately
+        await asyncio.sleep(2.5)  # the child waits 1s and then pages
+        assert received and received[0]["message"] == "wekker"
+        assert received[0]["JOB_ID"] == "fork-timer"
+    finally:
+        await receiver.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

@@ -24,7 +24,11 @@
 # Options:
 #   --pid <PID>            existing PID to watch
 #   --run <command>        shell command to run (foreground) and report on
+#   --fork                 run in the background and return immediately;
+#                          the notification is sent when the job finishes
 #   --notify               send one notification immediately (message from stdin/--message)
+#   --timer <sec>          wait this many seconds before sending (your own alarm
+#                          clock; combine with --notify, and with --fork to detach)
 #   --session <uuid|file>  mailbox UUID or path to a session file (default: ./.pager_session)
 #   --message <msg>        message to send (default: "process done")
 #   --job-id <id>          JOB_ID (default: the pid or "notify")
@@ -154,10 +158,33 @@ print_help() {
     awk 'NR > 1 { if ($0 !~ /^#/) exit; print }' "$0"
 }
 
+# --fork is detected before argument parsing: "$@" is still intact here.
+# Re-exec with the same arguments as a marked child; the parent returns at once.
+if [ "${_PAGER_FORKED:-0}" != "1" ]; then
+    for _pager_arg in "$@"; do
+        if [ "$_pager_arg" = "--fork" ]; then
+            # Detach fully (new session, stdin/stdout/stderr from /dev/null):
+            # the child is independent of the calling shell or terminal.
+            if command -v setsid >/dev/null 2>&1; then
+                _PAGER_FORKED=1 setsid "$0" "$@" >/dev/null 2>&1 < /dev/null &
+            else
+                _PAGER_FORKED=1 nohup "$0" "$@" >/dev/null 2>&1 < /dev/null &
+            fi
+            echo "pager.sh: forked into background (pid $!)"
+            # The parent finished successfully by forking: disarm the exit/term
+            # traps so it does not send a bogus "aborted before notifying" page.
+            trap - EXIT TERM INT
+            exit 0
+        fi
+    done
+fi
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --pid)            PID="$2"; shift 2 ;;
         --run)            RUN="$2"; shift 2 ;;
+        --fork)           FORK=1; shift ;;
+        --timer|--delay|--alarmclock) TIMER="$2"; shift 2 ;;
         --notify)         NOTIFY=1; shift ;;
         --session)        SESSION="$2"; shift 2 ;;
         --message)        MESSAGE="$2"; shift 2 ;;
@@ -186,6 +213,13 @@ if ! resolve_uuid; then
     exit 1
 fi
 
+# --timer: wait before sending (an alarm clock for yourself).
+if [ -n "$TIMER" ]; then
+    case "$TIMER" in
+        ''|*[!0-9]*) echo "pager.sh: --timer expects whole seconds" >&2; exit 1 ;;
+    esac
+fi
+
 # Immediate notify mode: no command watching, just send one notification.
 if [ "$NOTIFY" -eq 1 ]; then
     if [ -z "$MESSAGE" ] && [ ! -t 0 ]; then
@@ -198,6 +232,8 @@ if [ "$NOTIFY" -eq 1 ]; then
         echo "$(build_payload "$SUCCESS_STATUS" "$MESSAGE" "" "$DRY_RUN")"
         exit "$DRY_RUN"
     fi
+    # --timer: wait this long before sending (your own alarm clock).
+    [ -n "$TIMER" ] && sleep "$TIMER"
     if send_page "$SUCCESS_STATUS" "$MESSAGE" "" 0; then
         exit 0
     else
