@@ -23,12 +23,25 @@ except ImportError:
     markdown = None
 
 try:
+    import qrcode
+    import qrcode.image.svg
+except ImportError:
+    qrcode = None
+
+try:
     import markdown
 except ImportError:
     markdown = None
 
+try:
+    import qrcode
+    import qrcode.image.svg
+except ImportError:
+    qrcode = None
+
 from . import __build__, __version__
 from .gpgkeys import GpgKeyring
+from .invite import contact_uri, new_slug
 from .mesh import Mesh
 from .storage import MailboxStore
 
@@ -412,6 +425,74 @@ def build_app() -> web.Application:
         if not name or not filepath.startswith(os.path.abspath(sample_dir) + os.sep) or not os.path.isfile(filepath):
             raise web.HTTPNotFound()
         return web.FileResponse(filepath, headers={**static_cache, "Content-Type": "application/x-sh"})
+
+    invite_ttl = int(os.getenv("INVITE_TTL_SECONDS", "86400"))
+    invite_scheme = os.getenv("INVITE_SCHEME", "pagerapp")
+
+    async def create_invite(request: web.Request) -> web.Response:
+        token = request.match_info["token"]
+        store.touch(token)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="JSON object required")
+        u2 = body.get("u2")
+        if u2:
+            try:
+                uuid.UUID(str(u2))
+            except ValueError:
+                raise web.HTTPBadRequest(text="u2 must be a UUID") from None
+        n = body.get("n")
+        i = body.get("i")
+        try:
+            ttl = int(body.get("ttl_seconds") or invite_ttl)
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="ttl_seconds must be a number") from None
+        if ttl <= 0 or ttl > 30 * 86400:
+            raise web.HTTPBadRequest(text="ttl_seconds out of range")
+        chat = bool(body.get("chat"))
+        scheme = body.get("scheme") or invite_scheme
+        if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*$", str(scheme)):
+            raise web.HTTPBadRequest(text="scheme must be a valid URI scheme")
+        base = mesh_public_url if os.getenv("PAGER_PUBLIC_URL") else f"{request.scheme}://{request.host}"
+        expires = time.time() + ttl
+        slug = new_slug()
+        for _ in range(10):
+            if store.get_invite(slug) is None:
+                break
+            slug = new_slug()
+        store.add_invite(slug, token, u2 or None, base, n, i, expires, scheme=scheme, chat=chat)
+        # Backwards compatible: only a chat invite carries the pagerapp contact
+        # URI; a plain pager invite just resolves to the mailbox UUID.
+        uri = contact_uri(token, u2 or None, base, n, i, scheme=scheme) if chat else token
+        return web.json_response({
+            "slug": slug,
+            "url": f"{base}/invite/{slug}",
+            "uri": uri,
+            "qr": f"{base}/invite/{slug}/qr",
+            "expires": expires,
+        }, status=201)
+
+    async def get_invite(request: web.Request) -> web.Response:
+        record = store.get_invite(request.match_info["slug"])
+        if record is None:
+            raise web.HTTPNotFound(text="invite not found or expired")
+        uri = contact_uri(record["u1"], record["u2"], record["s"], record["n"], record["i"], scheme=record.get("scheme") or "pagerapp") if record.get("chat") else record["u1"]
+        if request.query.get("redirect"):
+            return web.Response(status=302, headers={"Location": uri})
+        return web.json_response({**record, "uri": uri})
+
+    async def invite_qr(request: web.Request) -> web.Response:
+        record = store.get_invite(request.match_info["slug"])
+        if record is None:
+            raise web.HTTPNotFound(text="invite not found or expired")
+        uri = contact_uri(record["u1"], record["u2"], record["s"], record["n"], record["i"], scheme=record.get("scheme") or "pagerapp") if record.get("chat") else record["u1"]
+        if qrcode is None:
+            raise web.HTTPInternalServerError(text="qrcode package is required for the QR endpoint")
+        image = qrcode.make(uri, image_factory=qrcode.image.svg.SvgImage)
+        return web.Response(body=image.to_string(), content_type="image/svg+xml")
 
     async def new_mailbox(_: web.Request) -> web.Response:
         token = str(uuid.uuid4())
@@ -957,7 +1038,7 @@ def build_app() -> web.Application:
 
     app = web.Application(client_max_size=max_bytes)
     app.middlewares.append(mesh_discovery)
-    app.add_routes([web.post("/mesh/query", mesh_query), web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
+    app.add_routes([web.post("/mesh/query", mesh_query), web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/mailboxes/{token}/invite", create_invite), web.get("/invite/{slug}", get_invite), web.get("/invite/{slug}/qr", invite_qr), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app

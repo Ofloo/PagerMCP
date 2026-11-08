@@ -24,7 +24,7 @@ ARG PAGER_NAMESERVER=
 CMD test -z "${PAGER_NAMESERVER}" || echo "nameserver ${PAGER_NAMESERVER}" > /etc/resolv.conf
 
 # Dependencies come from pkg (no pip, no build).
-PKG python312 py312-aiohttp py312-markdown py312-cryptography py312-sqlite3 gnupg
+PKG python312 py312-aiohttp py312-markdown py312-cryptography py312-sqlite3 gnupg py312-qrcode
 
 # Dedicated service account and data directory.
 CMD pw groupadd -n pagermcp 2>/dev/null || true

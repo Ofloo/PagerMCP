@@ -200,6 +200,15 @@ client                instance B (unknown UUID)       instance A (owner)
 - **PagerSMTPd** — the SMTP gateway (`uuid@pager.ofloo.io` → a page), for cron
   jobs and monitoring: <https://github.com/Ofloo/PagerSMTPd>
 
+## Invite links
+
+`POST /mailboxes/{uuid}/invite` gives a human-readable link with a TTL (24h).
+Without `chat` it simply resolves to your mailbox UUID (any pager client).
+With `chat: true` it carries the full `pagerapp://contact?...` URI — the exact
+format PagerAPP scans — and `GET /invite/<slug>/qr` serves that URI as an SVG
+QR code, so the existing scanner works unchanged. The scheme prefix is
+configurable (`INVITE_SCHEME` or a per-invite `scheme`) for other clients.
+
 ## 10. Handy endpoints
 
 | Endpoint | Purpose |

@@ -223,6 +223,10 @@ Abuse is fenced off with a **peer blacklist**: static via `PAGER_PEER_BLACKLIST`
 
 A fully illustrated, self-contained protocol guide (with examples and diagrams) is served at `GET /doc` — no external resources are fetched.
 
+## Invite links (PagerAPP onboarding)
+
+`POST /mailboxes/{uuid}/invite` creates a human-readable invite link with a TTL (`INVITE_TTL_SECONDS`, default 24h). A **plain** pager invite (no flag) just resolves to the mailbox UUID — backwards compatible with any pager client. With `chat: true` it carries the full `pagerapp://contact?u1=...&u2=...&s=...&n=...&i=...` URI that PagerAPP already scans/pastes/NFC-reads: `u1` is your receiving mailbox, `u2` is an optional mailbox you created for the scanner, `s` is the public server base URL, `n`/`i` are an optional display name and sender id. The scheme prefix is configurable (`INVITE_SCHEME`, default `pagerapp`, or a per-invite `scheme` field) so other clients can use their own. `GET /invite/<slug>` returns the JSON (+ `?redirect=1` for a 302 to the URI), and `GET /invite/<slug>/qr` serves an **SVG QR code** encoding exactly that URI — the existing PagerAPP scanner works unchanged. After the TTL the link is **404/410** and purged.
+
 ## Ecosystem
 
 The same privacy-first protocol is used by a small family of free, open projects:

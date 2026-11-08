@@ -40,6 +40,7 @@ class MailboxStore:
         self.subscription_ttl = subscription_ttl
         self.max_subscriptions = max_subscriptions
         self.p2p_max_entries = p2p_max_entries
+        self.invites: dict[str, dict] = {}
         self.p2p_max_per_mailbox = p2p_max_per_mailbox
         self.lock = threading.RLock()
         self.db: sqlite3.Connection | None = None
@@ -56,6 +57,7 @@ class MailboxStore:
             self.db.execute("CREATE TABLE IF NOT EXISTS push_subscriptions (id TEXT PRIMARY KEY, token TEXT NOT NULL, channel TEXT NOT NULL, endpoint TEXT NOT NULL, keys TEXT, created REAL NOT NULL, renewed REAL NOT NULL, expires REAL NOT NULL, warned REAL NOT NULL DEFAULT 0)")
             self.db.execute("CREATE TABLE IF NOT EXISTS mailbox_modes (token TEXT PRIMARY KEY, webclient_expires REAL NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS p2p_dedupe (mailbox TEXT NOT NULL, p2p_id TEXT NOT NULL, message_id TEXT NOT NULL, payload_sha256 TEXT NOT NULL, seen_at REAL NOT NULL, expires_at REAL NOT NULL, PRIMARY KEY (mailbox, p2p_id))")
+            self.db.execute("CREATE TABLE IF NOT EXISTS invites (slug TEXT PRIMARY KEY, u1 TEXT NOT NULL, u2 TEXT, s TEXT, n TEXT, i TEXT, expires REAL NOT NULL, scheme TEXT NOT NULL DEFAULT 'pagerapp', chat INTEGER NOT NULL DEFAULT 0)")
             self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_expires_idx ON p2p_dedupe(expires_at)")
             self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_seen_idx ON p2p_dedupe(seen_at)")
             # Purge scans these columns on every cleanup tick.
@@ -86,6 +88,7 @@ class MailboxStore:
             self.db.execute("DELETE FROM push_subscriptions WHERE expires <= ?", (now,))
             self.db.execute("DELETE FROM push_subscriptions WHERE token NOT IN (SELECT token FROM mailboxes) AND token NOT IN (SELECT DISTINCT token FROM pages)")
             self.db.execute("DELETE FROM p2p_dedupe WHERE expires_at <= ?", (now,))
+            self.db.execute("DELETE FROM invites WHERE expires <= ?", (now,))
             self.db.commit()
         else:
             for token in list(self.modes):
@@ -107,6 +110,29 @@ class MailboxStore:
                     del self.subscriptions[token]
             for key in [k for k, entry in self.p2p.items() if entry["expires_at"] <= now]:
                 del self.p2p[key]
+
+    def add_invite(self, slug: str, u1: str, u2, s, n, i, expires: float, scheme: str = "pagerapp", chat: bool = False) -> None:
+        record = {"slug": slug, "u1": u1, "u2": u2, "s": s, "n": n, "i": i, "expires": expires, "scheme": scheme, "chat": chat}
+        if self.db:
+            self.db.execute("INSERT OR REPLACE INTO invites (slug, u1, u2, s, n, i, expires, scheme, chat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (slug, u1, u2, s, n, i, expires, scheme, chat))
+            self.db.commit()
+        else:
+            self.invites[slug] = record
+
+    def get_invite(self, slug: str):
+        now = time.time()
+        if self.db:
+            row = self.db.execute("SELECT slug, u1, u2, s, n, i, expires, scheme, chat FROM invites WHERE slug = ?", (slug,)).fetchone()
+            if not row:
+                return None
+            record = {"slug": row[0], "u1": row[1], "u2": row[2], "s": row[3], "n": row[4], "i": row[5], "expires": row[6], "scheme": row[7] or "pagerapp", "chat": bool(row[8])}
+        else:
+            record = self.invites.get(slug)
+            if record is None:
+                return None
+        if record["expires"] <= now:
+            return None  # expired invites are simply gone
+        return record
 
     def mailbox_tokens(self) -> list[str]:
         """All mailbox tokens this instance knows (for mesh ownership checks)."""

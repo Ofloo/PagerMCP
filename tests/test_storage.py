@@ -1903,6 +1903,83 @@ async def test_pager_sh_fork_and_timer():
         await receiver.close()
 
 
+@pytest.mark.asyncio
+async def test_invite_link_matches_pagerapp_contact_format(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        scanner_box = str(uuid.uuid4())
+        created = await client.post(f"/mailboxes/{token}/invite", json={"u2": scanner_box, "n": "Of loo", "i": "sender-1", "ttl_seconds": 3600, "chat": True})
+        assert created.status == 201
+        data = await created.json()
+        assert data["slug"] and data["url"].endswith("/invite/" + data["slug"])
+        uri = data["uri"]
+        assert uri.startswith("pagerapp://contact?")
+        assert f"u1={token}" in uri
+        assert f"u2={scanner_box}" in uri
+        assert "s=" in uri
+        assert "n=Of+loo" in uri or "n=Of%20loo" in uri
+        assert "i=sender-1" in uri
+
+        resolved = await client.get(f"/invite/{data['slug']}")
+        assert resolved.status == 200
+        resolved_data = await resolved.json()
+        assert resolved_data["uri"] == uri
+        assert resolved_data["u1"] == token and resolved_data["u2"] == scanner_box
+
+        redirect = await client.get(f"/invite/{data['slug']}?redirect=1", allow_redirects=False)
+        assert redirect.status == 302
+        assert redirect.headers["Location"] == uri
+
+        qr = await client.get(f"/invite/{data['slug']}/qr")
+        assert qr.status == 200
+        assert qr.headers["Content-Type"].startswith("image/svg+xml")
+        assert b"<svg" in await qr.read()
+
+        missing = await client.get("/invite/niets-bestaat")
+        assert missing.status == 404
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invite_plain_pager_address_without_chat_flag(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{token}/invite", json={})
+        data = await created.json()
+        assert data["uri"] == token  # a plain pager address, no pagerapp scheme
+        resolved = await (await client.get(f"/invite/{data['slug']}")).json()
+        assert resolved["uri"] == token and resolved["u1"] == token
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invite_expires(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{token}/invite", json={"ttl_seconds": 60})
+        slug = (await created.json())["slug"]
+        future = time.time() + 3600
+        monkeypatch.setattr(time, "time", lambda: future)
+        expired = await client.get(f"/invite/{slug}")
+        assert expired.status == 404
+    finally:
+        await client.close()
+
+
 def test_access_log_masks_uuid(tmp_path, monkeypatch):
     from pager_mcp.server import configure_access_log
     import logging

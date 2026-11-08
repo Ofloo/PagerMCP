@@ -261,3 +261,11 @@ ruime in-app-limiet als vangnet (firewall/reverse proxy is de primaire
 verdediging), rekening houden met N-mailboxen per client (20 contacten = 20
 polls per cyclus), en batch-poll (zie boven) als structurele oplossing om het
 aantal requests per client te beperken.
+
+## Invite-links met TTL + QR
+
+**Status: GEÏMPLEMENTEERD in v0.15.0** — afgestemd met de PagerAPP-agent op het
+bestaande `pagerapp://contact?u1=...&u2=...&s=...&n=...&i=...`-formaat;
+`chat: true` voor die URI, anders gewoon de mailbox-UUID (backwards compatibel);
+SVG-QR via `qrcode`; schema-prefix instelbaar (`INVITE_SCHEME` of per invite);
+TTL default 24h (`INVITE_TTL_SECONDS`), daarna 404/410 + reaper.
