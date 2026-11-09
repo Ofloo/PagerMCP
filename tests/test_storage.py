@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.15.3"
+        assert data["version"] == "0.15.4"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -2073,6 +2073,43 @@ async def test_mesh_redirect_uses_public_instance_url_not_configured_peer_url(mo
         peek = await a.get(f"/mailboxes/{token}/messages", allow_redirects=False)
         assert peek.status == 302
         armored = gpg_encrypt(settings_b["p2p"]["public_key"], token, tmp_path / "client")
+        payload = {"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "mailbox_encrypted": armored, "key_id": fp_b, "message": "x"}
+        resp = await a.post("/notify", json=payload, allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"] == "https://public-b.example/notify"
+    finally:
+        await a.close()
+        await b.close()
+
+
+@requires_gpg
+@pytest.mark.asyncio
+async def test_mesh_not_found_does_not_pollute_fingerprint_mapping(monkeypatch, tmp_path):
+    port_a, port_b = 18889, 18890
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "1")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "a"))
+    monkeypatch.setenv("P2P_GPG_ENABLED", "1")
+    monkeypatch.setenv("PAGER_PUBLIC_URL", f"http://127.0.0.1:{port_a}")
+    monkeypatch.setenv("PAGER_PEERS", f"http://127.0.0.1:{port_b}")
+    app_a = build_app()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "b"))
+    monkeypatch.setenv("PAGER_PUBLIC_URL", "https://public-b.example")
+    monkeypatch.setenv("PAGER_PEERS", f"http://127.0.0.1:{port_a}")
+    app_b = build_app()
+    a = TestClient(TestServer(app_a, host="127.0.0.1", port=port_a))
+    b = TestClient(TestServer(app_b, host="127.0.0.1", port=port_b))
+    await a.start_server()
+    await b.start_server()
+    try:
+        # a query for a mailbox nobody owns -> B answers not-found
+        fresh = str(uuid.uuid4())
+        resp = await a.get(f"/mailboxes/{fresh}/messages", allow_redirects=False)
+        assert resp.status == 200
+        # a p2p post with B's fingerprint must still end up at B's PUBLIC URL,
+        # not at the internal peer URL (which a not-found response would have mapped)
+        settings_b = await (await b.get("/settings")).json()
+        fp_b = settings_b["p2p"]["key_id"]
+        armored = gpg_encrypt(settings_b["p2p"]["public_key"], fresh, tmp_path / "client")
         payload = {"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "mailbox_encrypted": armored, "key_id": fp_b, "message": "x"}
         resp = await a.post("/notify", json=payload, allow_redirects=False)
         assert resp.status == 302

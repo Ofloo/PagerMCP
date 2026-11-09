@@ -142,10 +142,11 @@ class Mesh:
                     if response.status != 200:
                         continue
                     data = await response.json()
-                    # Peering: learn the responder's fingerprint AND its public
-                    # instance URL (the field a 302 should point at), not merely
-                    # the configured peer URL we happened to connect to.
-                    self.note_peer_fingerprint(data.get("instance") or peer, data.get("fingerprint"))
+                    # Only a response that actually reports an owning instance may
+                    # teach a fingerprint mapping. A not-found response must never
+                    # map the fingerprint to the internal configured peer address.
+                    if data.get("instance"):
+                        self.note_peer_fingerprint(data["instance"], data.get("fingerprint"))
                     if data.get("found") and data.get("instance"):
                         return str(data["instance"])
             except Exception:
