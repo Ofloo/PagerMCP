@@ -61,8 +61,8 @@ services:
       # P2P: verplicht GPG-versleutelde bestemmings-UUID (standaard aan).
       # P2P_GPG_ENABLED: "1"
       # Federatie: one-sided peer mesh (leeg = standalone).
-      # PAGER_PEERS: "http://peer1:8080,http://peer2:8080"
-      # PAGER_PUBLIC_URL: "https://pager.example.com"
+      PAGER_PUBLIC_URL: "https://pager.ofloo.io"
+      PAGER_PEERS: "https://glow-daniel-vacuum-wagner.trycloudflare.com,https://intended-annotated-anderson-chubby.trycloudflare.com,https://stunning-mold-requiring-exotic.trycloudflare.com"
       # PAGER_PEER_BLACKLIST: "192.0.2.10"
       # Invites: TTL + scheme-prefix.
       # INVITE_TTL_SECONDS: "86400"
