@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.15.1"
+        assert data["version"] == "0.15.2"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -2012,6 +2012,22 @@ async def test_chat_invite_creates_second_mailbox_and_self_destructs_on_first_ac
         page_id = (await (await client.get(f"/mailboxes/{u2}/messages")).json())["messages"][0]["id"]
         await client.post(f"/mailboxes/{u2}/ack", json={"id": page_id})
         assert (await client.get(f"/invite/{data['slug']}")).status == 404
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_invite_uses_forwarded_proto_for_public_https(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    app = build_app()
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        token = (await (await client.post("/mailboxes")).json())["uuid"]
+        created = await client.post(f"/mailboxes/{token}/invite", json={"chat": True}, headers={"X-Forwarded-Proto": "https"})
+        data = await created.json()
+        assert data["url"].startswith("https://")
+        assert "s=https%3A%2F%2F" in data["uri"]
     finally:
         await client.close()
 

@@ -463,7 +463,11 @@ def build_app() -> web.Application:
         scheme = body.get("scheme") or invite_scheme
         if not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*$", str(scheme)):
             raise web.HTTPBadRequest(text="scheme must be a valid URI scheme")
-        base = mesh_public_url if os.getenv("PAGER_PUBLIC_URL") else f"{request.scheme}://{request.host}"
+        # Behind a reverse proxy the internal hop is http even when the public
+        # URL is https: honour X-Forwarded-Proto (and PAGER_PUBLIC_URL when set)
+        # so the invite link and the embedded contact URI use the public scheme.
+        forwarded_proto = request.headers.get("X-Forwarded-Proto", request.scheme)
+        base = mesh_public_url if os.getenv("PAGER_PUBLIC_URL") else f"{forwarded_proto}://{request.host}"
         expires = time.time() + ttl
         slug = new_slug()
         for _ in range(10):
