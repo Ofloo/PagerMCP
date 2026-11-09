@@ -95,7 +95,14 @@ class Mesh:
 
     def note_peer_fingerprint(self, peer_url: str, fingerprint: str | None) -> None:
         if peer_url and fingerprint:
-            self.peer_fingerprints[peer_url.rstrip("/")] = fingerprint
+            # A peer's public instance URL may change (e.g. an internal IP becomes
+            # a public HTTPS host): the newest mapping for that fingerprint wins,
+            # so a 302 always points at the current public URL.
+            peer_url = peer_url.rstrip("/")
+            for url, fp in list(self.peer_fingerprints.items()):
+                if fp == fingerprint and url != peer_url:
+                    del self.peer_fingerprints[url]
+            self.peer_fingerprints[peer_url] = fingerprint
 
     def instance_for_fingerprint(self, fingerprint: str) -> str | None:
         for peer_url, fp in self.peer_fingerprints.items():
@@ -135,8 +142,10 @@ class Mesh:
                     if response.status != 200:
                         continue
                     data = await response.json()
-                    # Peering: learn the responder's key fingerprint as well.
-                    self.note_peer_fingerprint(peer, data.get("fingerprint"))
+                    # Peering: learn the responder's fingerprint AND its public
+                    # instance URL (the field a 302 should point at), not merely
+                    # the configured peer URL we happened to connect to.
+                    self.note_peer_fingerprint(data.get("instance") or peer, data.get("fingerprint"))
                     if data.get("found") and data.get("instance"):
                         return str(data["instance"])
             except Exception:
