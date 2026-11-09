@@ -6,7 +6,7 @@ Wants=network-online.target
 [Container]
 ContainerName=pagermcp
 # Same OCI image as the Docker deployment (pulled from Docker Hub).
-Image=docker.io/ofloo/pagermcp:v0.15.4
+Image=docker.io/ofloo/pagermcp:v0.15.5
 PublishPort=8080:8080
 Environment=MODE=server
 Environment=PORT=8080
