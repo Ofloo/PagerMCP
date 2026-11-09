@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.15.4"
+        assert data["version"] == "0.15.5"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -2117,6 +2117,54 @@ async def test_mesh_not_found_does_not_pollute_fingerprint_mapping(monkeypatch, 
     finally:
         await a.close()
         await b.close()
+
+
+@requires_gpg
+@pytest.mark.asyncio
+async def test_mesh_multi_hop_redirects_per_hop(monkeypatch, tmp_path):
+    # chain A <-> B <-> C (only neighbours are peers)
+    port_a, port_b, port_c = 18891, 18892, 18893
+    url_a = f"http://127.0.0.1:{port_a}"
+    url_b = f"http://127.0.0.1:{port_b}"
+    url_c = f"http://127.0.0.1:{port_c}"
+    monkeypatch.setenv("P2P_DEDUPE_ENABLED", "1")
+    monkeypatch.setenv("P2P_GPG_ENABLED", "1")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "a"))
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_a)
+    monkeypatch.setenv("PAGER_PEERS", url_b)
+    app_a = build_app()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "b"))
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_b)
+    monkeypatch.setenv("PAGER_PEERS", f"{url_a},{url_c}")
+    app_b = build_app()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "c"))
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_c)
+    monkeypatch.setenv("PAGER_PEERS", url_b)
+    app_c = build_app()
+    a = TestClient(TestServer(app_a, host="127.0.0.1", port=port_a))
+    b = TestClient(TestServer(app_b, host="127.0.0.1", port=port_b))
+    c = TestClient(TestServer(app_c, host="127.0.0.1", port=port_c))
+    await a.start_server()
+    await b.start_server()
+    await c.start_server()
+    try:
+        settings_c = await (await c.get("/settings")).json()
+        fp_c = settings_c["p2p"]["key_id"]
+        token = (await (await c.post("/mailboxes")).json())["uuid"]
+        armored = gpg_encrypt(settings_c["p2p"]["public_key"], token, tmp_path / "client")
+        payload = {"p2p": True, "p2p_id": str(uuid.uuid4()), "p2p_expires_at": int(time.time()) + 3600, "mailbox_encrypted": armored, "key_id": fp_c, "message": "x"}
+        # A must point to B (the next hop), NOT directly to C
+        resp = await a.post("/notify", json=payload, allow_redirects=False)
+        assert resp.status == 302
+        assert resp.headers["Location"] == url_b + "/notify"
+        # posting to B then points to C
+        resp_b = await b.post("/notify", json=payload, allow_redirects=False)
+        assert resp_b.status == 302
+        assert resp_b.headers["Location"] == url_c + "/notify"
+    finally:
+        await a.close()
+        await b.close()
+        await c.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

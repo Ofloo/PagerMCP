@@ -190,4 +190,9 @@ class Mesh:
             return {"found": False, "seen": True}
         forwarded = {**body, "hops": hops - 1, "origin": self.public_url}
         instance = await self._ask_peers(session, forwarded, exclude=origin)
-        return {"found": True, "instance": instance} if instance else {"found": False}
+        if not instance:
+            return {"found": False}
+        # Per-hop redirects: the requester is sent to ME (the next hop in the
+        # chain), not directly to the final owner. When the client posts here, I
+        # do my own lookup and redirect further, until it reaches the owner.
+        return {"found": True, "instance": self.public_url}

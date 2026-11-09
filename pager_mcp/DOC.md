@@ -181,6 +181,8 @@ client                instance B (unknown UUID)       instance A (owner)
 - The query is `WHOHAS <unixtime> <sha256>`: `sha256("<uuid>:<period-index>")`
   computed with the timestamp carried by the query, so both sides are in sync.
 - Only hashes travel the mesh — never the raw UUID, and never message content.
+- Redirects are **per hop**: each server points to the next peer in the chain,
+  so the client walks A -> B -> C with one 302 per hop.
 - Unknown everywhere → the mailbox is simply created locally (standalone
   behaviour).
 - Queries are forwarded with a hop limit and a query-id seen-set (no loops);
