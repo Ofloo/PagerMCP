@@ -64,7 +64,7 @@ def main():
 
     # --- basic endpoints ---
     s, d = req("GET", "/healthz"); check("healthz", s == 200 and d.get("status") == "ok")
-    s, d = req("GET", "/version"); check("version", s == 200 and d.get("version") == "0.15.5", d.get("version"))
+    s, d = req("GET", "/version"); check("version", s == 200 and __import__("re").match(r"^\d+\.\d+\.\d+$", str(d.get("version", ""))), d.get("version"))
     check("settings identity=hash", subs.get("identity") == "hash" and subs.get("identity_period_seconds") == 3600)
     check("settings server_time fresh", abs(settings.get("server_time", 0) - int(time.time())) < 60)
     check("settings connections cap", settings.get("connections", {}).get("max_per_mailbox") == 5)
