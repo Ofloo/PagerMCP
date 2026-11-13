@@ -223,6 +223,24 @@ def main():
         s, d = req("POST", "/mesh/query", {"fingerprint": "deadbeef", "query_id": str(uuidmod.uuid4()), "hops": 1}, timeout=8)
         check("mesh query answers when not blacklisted", s in (200, 403))
 
+    # --- move protocol: migrate a mailbox to the peer and get a tombstone ---
+    if PEER:
+        mv = new_mailbox()
+        req("POST", "/notify", {"uuid": mv, "message": "move me"})
+        s, d = req("POST", f"/mailboxes/{mv}/move", {"to": PEER})
+        check("move accepted", s == 200 and d.get("moved") is True, d)
+        import http.client
+        host = BASE.split("://")[1].split(":")[0]
+        port = BASE.rsplit(":", 1)[1]
+        conn = http.client.HTTPConnection(host, int(port), timeout=15)
+        conn.request("GET", f"/mailboxes/{mv}/messages")
+        r = conn.getresponse()
+        check("move tombstone 302 to peer", r.status == 302 and r.headers.get("Location", "").startswith(PEER), f"{r.status}")
+        r.read()
+        import urllib.request as _u
+        msgs = json.loads(_u.urlopen(_u.Request(PEER + f"/mailboxes/{mv}/messages"), timeout=12).read())["messages"]
+        check("move delivered mailbox to peer", len(msgs) == 1 and msgs[0].get("message") == "move me")
+
     failed = [r for r in RESULTS if not r]
     print(f"\n=== {len(RESULTS) - len(failed)}/{len(RESULTS)} geslaagd op {BASE} ===")
     return 1 if failed else 0

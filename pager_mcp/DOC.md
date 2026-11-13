@@ -211,6 +211,13 @@ format PagerAPP scans — and `GET /invite/<slug>/qr` serves that URI as an SVG
 QR code, so the existing scanner works unchanged. The scheme prefix is
 configurable (`INVITE_SCHEME` or a per-invite `scheme`) for other clients.
 
+## Mailbox move
+
+`POST /mailboxes/{uuid}/move` with `{"to": "<base URL>"}` migrates a mailbox to
+another instance: the source exports the full state and then deletes it
+locally, and latecomers get a 302 to the new owner instead of a duplicate
+mailbox. The destination imports it. Higher epoch wins on conflicts.
+
 ## 10. Handy endpoints
 
 | Endpoint | Purpose |

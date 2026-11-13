@@ -199,7 +199,7 @@ async def test_version_endpoint():
         assert resp.status == 200
         data = await resp.json()
         assert data["version"] == __version__
-        assert data["version"] == "0.15.5"
+        assert data["version"] == "0.16.0"
         assert data["build"] == __build__
         assert "hostname" in data
     finally:
@@ -2165,6 +2165,37 @@ async def test_mesh_multi_hop_redirects_per_hop(monkeypatch, tmp_path):
         await a.close()
         await b.close()
         await c.close()
+
+
+@pytest.mark.asyncio
+async def test_move_mailbox_migrates_state_and_tombstones_source(monkeypatch):
+    monkeypatch.setenv("P2P_GPG_ENABLED", "0")
+    url_a = "http://127.0.0.1:18891"
+    url_b = "http://127.0.0.1:18892"
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_a)
+    monkeypatch.setenv("PAGER_PEERS", url_b)
+    app_a = build_app()
+    monkeypatch.setenv("PAGER_PUBLIC_URL", url_b)
+    monkeypatch.setenv("PAGER_PEERS", url_a)
+    app_b = build_app()
+    a = TestClient(TestServer(app_a, host="127.0.0.1", port=18891))
+    b = TestClient(TestServer(app_b, host="127.0.0.1", port=18892))
+    await a.start_server()
+    await b.start_server()
+    try:
+        token = (await (await a.post("/mailboxes")).json())["uuid"]
+        await a.post("/notify", json={"uuid": token, "message": "move me"})
+        resp = await a.post(f"/mailboxes/{token}/move", json={"to": url_b})
+        assert resp.status == 200, await resp.text()
+        # latecomers on the source get a 302 to the new owner (no duplicate creation)
+        after = await a.get(f"/mailboxes/{token}/messages", allow_redirects=False)
+        assert after.status == 302 and after.headers["Location"].startswith(url_b)
+        # the destination has the mailbox with the message
+        msgs = await (await b.get(f"/mailboxes/{token}/messages")).json()
+        assert len(msgs["messages"]) == 1 and msgs["messages"][0]["message"] == "move me"
+    finally:
+        await a.close()
+        await b.close()
 
 
 def test_access_log_masks_uuid(tmp_path, monkeypatch):

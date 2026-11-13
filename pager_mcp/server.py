@@ -329,6 +329,12 @@ def build_app() -> web.Application:
         # Unknown mailbox on a meshed instance: WHO HAS the hash, and if a peer
         # owns it the client gets a 302 to that instance. Otherwise it is just
         # created locally, exactly as in standalone mode.
+        if request.path.startswith("/mailboxes/"):
+            token = request.match_info.get("token", "")
+            if token:
+                moved_to = store.moved_destination(token)
+                if moved_to:
+                    return web.Response(status=302, headers={"Location": moved_to + request.path_qs})
         if mesh.enabled and request.path.startswith("/mailboxes/"):
             token = request.match_info.get("token", "")
             if token:
@@ -504,6 +510,52 @@ def build_app() -> web.Application:
             raise web.HTTPInternalServerError(text="qrcode package is required for the QR endpoint")
         image = qrcode.make(uri, image_factory=qrcode.image.svg.SvgImage)
         return web.Response(body=image.to_string(), content_type="image/svg+xml")
+
+    async def move_mailbox(request: web.Request) -> web.Response:
+        """Client-initiated move: migrate this mailbox to another instance.
+
+        The client says to its configured server: move my mailbox to <to>.
+        We export the full state to the destination (POST /mesh/move) and then
+        delete it locally. Not used for p2p messages (those route via the mesh).
+        """
+        token = request.match_info["token"]
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="invalid JSON") from exc
+        to = str(body.get("to") or "").rstrip("/")
+        if not re.match(r"^https?://", to):
+            raise web.HTTPBadRequest(text="to must be an http(s) base URL")
+        state = store.export_mailbox(token)
+        if state is None:
+            raise web.HTTPNotFound(text="mailbox not found")
+        state["epoch"] = store.epoch(token) + 1
+        session = push_state["session"]
+        if session is None or session.closed:
+            raise web.HTTPServiceUnavailable(text="move is not available yet")
+        async with session.post(f"{to}/mesh/move", json=state, timeout=ClientTimeout(total=15), allow_redirects=False) as response:
+            if response.status != 200:
+                raise web.HTTPBadGateway(text="the destination refused the move")
+        store.delete_mailbox(token)
+        # Tombstone for latecomers: a request for the moved UUID must not create a
+        # duplicate mailbox here; it gets a 302 to the new owner instead.
+        store.mark_moved(token, to)
+        return web.json_response({"moved": True, "to": to})
+
+    async def mesh_move(request: web.Request) -> web.Response:
+        """Receive a mailbox that is being moved here from another instance."""
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="invalid JSON") from exc
+        token = body.get("uuid")
+        if not token:
+            raise web.HTTPBadRequest(text="uuid is required")
+        incoming_epoch = int(body.get("epoch", 0))
+        if store.has_mailbox(token) and store.epoch(token) >= incoming_epoch:
+            return web.json_response({"moved": False, "reason": "epoch is not newer"}, status=409)
+        store.import_mailbox(body)
+        return web.json_response({"moved": True, "uuid": token})
 
     async def new_mailbox(_: web.Request) -> web.Response:
         token = str(uuid.uuid4())
@@ -1059,7 +1111,7 @@ def build_app() -> web.Application:
 
     app = web.Application(client_max_size=max_bytes)
     app.middlewares.append(mesh_discovery)
-    app.add_routes([web.post("/mesh/query", mesh_query), web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/mailboxes/{token}/invite", create_invite), web.get("/invite/{slug}", get_invite), web.get("/invite/{slug}/qr", invite_qr), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
+    app.add_routes([web.post("/mesh/query", mesh_query), web.get("/healthz", health), web.get("/version", version), web.get("/settings", settings_endpoint), web.get("/", root), web.get("/rfc", rfc), web.get("/privacy", privacy), web.get("/doc", doc), web.get("/sample/{name}", sample), web.post("/mailboxes", new_mailbox), web.post("/mailboxes/{token}/move", move_mailbox), web.post("/mesh/move", mesh_move), web.post("/mailboxes/{token}/invite", create_invite), web.get("/invite/{slug}", get_invite), web.get("/invite/{slug}/qr", invite_qr), web.post("/notify", notify), web.get("/mailboxes/{token}/messages", pending), web.post("/mailboxes/{token}/consume", consume), web.post("/mailboxes/{token}/ack", ack), web.get("/mailboxes/{token}/wait", wait), web.get("/mailboxes/{token}/events", events), web.post("/mailboxes/{token}/subscriptions", add_subscription), web.get("/mailboxes/{token}/subscriptions", list_subscriptions), web.delete("/mailboxes/{token}/subscriptions/{sub_id}", remove_subscription), web.delete("/mailboxes/{token}/subscriptions", remove_subscriptions), web.get("/mailboxes/{token}/status", mailbox_status), web.get("/mailboxes/{token}/mode", get_mode), web.post("/mailboxes/{token}/mode", set_mode)])
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
     return app

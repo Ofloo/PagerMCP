@@ -41,6 +41,8 @@ class MailboxStore:
         self.max_subscriptions = max_subscriptions
         self.p2p_max_entries = p2p_max_entries
         self.invites: dict[str, dict] = {}
+        self.epochs: dict[str, int] = {}
+        self.moved_to: dict[str, str] = {}
         self.p2p_max_per_mailbox = p2p_max_per_mailbox
         self.lock = threading.RLock()
         self.db: sqlite3.Connection | None = None
@@ -58,6 +60,8 @@ class MailboxStore:
             self.db.execute("CREATE TABLE IF NOT EXISTS mailbox_modes (token TEXT PRIMARY KEY, webclient_expires REAL NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS p2p_dedupe (mailbox TEXT NOT NULL, p2p_id TEXT NOT NULL, message_id TEXT NOT NULL, payload_sha256 TEXT NOT NULL, seen_at REAL NOT NULL, expires_at REAL NOT NULL, PRIMARY KEY (mailbox, p2p_id))")
             self.db.execute("CREATE TABLE IF NOT EXISTS invites (slug TEXT PRIMARY KEY, u1 TEXT NOT NULL, u2 TEXT, s TEXT, n TEXT, i TEXT, expires REAL NOT NULL, scheme TEXT NOT NULL DEFAULT 'pagerapp', chat INTEGER NOT NULL DEFAULT 0)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS mailbox_epochs (token TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS moved_mailboxes (token TEXT PRIMARY KEY, destination TEXT NOT NULL)")
             self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_expires_idx ON p2p_dedupe(expires_at)")
             self.db.execute("CREATE INDEX IF NOT EXISTS p2p_dedupe_seen_idx ON p2p_dedupe(seen_at)")
             # Purge scans these columns on every cleanup tick.
@@ -146,6 +150,76 @@ class MailboxStore:
             self.db.commit()
         else:
             self.invites.pop(slug, None)
+
+    def epoch(self, token: str) -> int:
+        if self.db:
+            row = self.db.execute("SELECT epoch FROM mailbox_epochs WHERE token = ?", (token,)).fetchone()
+            return int(row[0]) if row else 0
+        return self.epochs.get(token, 0)
+
+    def set_epoch(self, token: str, value: int) -> None:
+        if self.db:
+            self.db.execute("INSERT OR REPLACE INTO mailbox_epochs (token, epoch) VALUES (?, ?)", (token, value))
+            self.db.commit()
+        else:
+            self.epochs[token] = value
+
+    def has_mailbox(self, token: str) -> bool:
+        return token in self.mailbox_tokens()
+
+    def export_mailbox(self, token: str) -> dict | None:
+        if not self.has_mailbox(token):
+            return None
+        return {
+            "uuid": token,
+            "epoch": self.epoch(token),
+            "pages": [{"id": p.id, "payload": p.payload, "created_at": p.created_at, "acked": p.acked} for p in self.pending(token)],
+            "subscriptions": [{"id": s.id, "channel": s.channel, "endpoint": s.endpoint, "keys": s.keys, "created": s.created, "renewed": s.renewed, "expires": s.expires, "warned": s.warned} for s in self.subscriptions_for(token)],
+            "modes": self.modes.get(token, 0),
+        }
+
+    def import_mailbox(self, state: dict) -> None:
+        token = state["uuid"]
+        self.touch(token)
+        for page in state.get("pages", []):
+            with self.lock:
+                if self.db:
+                    self.db.execute("INSERT OR REPLACE INTO pages VALUES(?,?,?,?,?)", (page["id"], token, json.dumps(page["payload"]), page["created_at"], 1 if page.get("acked") else 0))
+                else:
+                    last_seen, pages = self.mailboxes[token]
+                    pages.append(Page(page["id"], token, page["payload"], page["created_at"], page.get("acked", False)))
+                    self.mailboxes[token] = (last_seen, pages)
+        for sub in state.get("subscriptions", []):
+            self.add_subscription(token, sub["channel"], sub["endpoint"], sub.get("keys"))
+        self.set_epoch(token, int(state.get("epoch", 0)))
+
+    def delete_mailbox(self, token: str) -> None:
+        """After a successful move the local state is gone (no tombstone/redirect)."""
+        if self.db:
+            self.db.execute("DELETE FROM pages WHERE token = ?", (token,))
+            self.db.execute("DELETE FROM push_subscriptions WHERE token = ?", (token,))
+            self.db.execute("DELETE FROM mailbox_modes WHERE token = ?", (token,))
+            self.db.execute("DELETE FROM mailboxes WHERE token = ?", (token,))
+            self.db.execute("DELETE FROM mailbox_epochs WHERE token = ?", (token,))
+            self.db.commit()
+        else:
+            self.mailboxes.pop(token, None)
+            self.subscriptions.pop(token, None)
+            self.modes.pop(token, None)
+            self.epochs.pop(token, None)
+
+    def mark_moved(self, token: str, destination: str) -> None:
+        if self.db:
+            self.db.execute("INSERT OR REPLACE INTO moved_mailboxes (token, destination) VALUES (?, ?)", (token, destination))
+            self.db.commit()
+        else:
+            self.moved_to[token] = destination
+
+    def moved_destination(self, token: str) -> str | None:
+        if self.db:
+            row = self.db.execute("SELECT destination FROM moved_mailboxes WHERE token = ?", (token,)).fetchone()
+            return row[0] if row else None
+        return self.moved_to.get(token)
 
     def mailbox_tokens(self) -> list[str]:
         """All mailbox tokens this instance knows (for mesh ownership checks)."""
